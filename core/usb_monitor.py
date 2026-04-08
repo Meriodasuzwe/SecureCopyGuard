@@ -129,16 +129,24 @@ class USBMonitor(QThread):
         print("[USB] USB monitoring stopped.")
 
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
-        if msg == WM_DEVICECHANGE:
-            if wparam in (DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE):
+        # 0x0219 = WM_DEVICECHANGE, 0x8000 = DBT_DEVICEARRIVAL, 0x8004 = DBT_DEVICEREMOVECOMPLETE
+        if msg == 0x0219:
+            if wparam in (0x8000, 0x8004):
                 drive = self._parse_drive(lparam)
-                if wparam == DBT_DEVICEARRIVAL:
-                    print(f"[USB ALERT] Connected: {drive or 'unknown'}")
+                if wparam == 0x8000:
+                    print(f"[USB] Подключено: {drive}")
                     self.device_connected.emit(drive)
                 else:
-                    print(f"[USB] Disconnected: {drive or 'unknown'}")
+                    print(f"[USB] Отключено: {drive}")
                     self.device_disconnected.emit(drive)
-        return ctypes.windll.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+        
+        # Явно указываем 64-битные типы, чтобы избежать OverflowError
+        import ctypes.wintypes as wintypes
+        user32 = ctypes.windll.user32
+        user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.DefWindowProcW.restype = wintypes.LPARAM
+        
+        return user32.DefWindowProcW(hwnd, msg, wintypes.WPARAM(wparam), wintypes.LPARAM(lparam))
 
     @staticmethod
     def _parse_drive(lparam):

@@ -5,7 +5,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QLineEdit, QGroupBox, QApplication
+    QHeaderView, QAbstractItemView, QLineEdit, QGroupBox, QApplication, QCheckBox
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor
@@ -13,6 +13,7 @@ from PyQt5.QtGui import QColor
 from ui.widgets import MetricCard, PolicyCard
 from ui.theme import *
 from db.database import Database
+from config import set_config_value, verify_pin, hash_pin, get_config_value
 
 from core.file_locker   import FileLocker
 from core.file_watcher  import FolderWatcher
@@ -20,6 +21,7 @@ from core.clipboard_guard import ClipboardGuard
 from core.usb_monitor   import USBMonitor
 from core.vision_protector import VisionProtector
 from core.telegram_alerts  import send_telegram_alert
+from core.autostart import enable_autostart, disable_autostart, is_enabled as autostart_is_enabled
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -40,7 +42,7 @@ class DashboardPage(QWidget):
         self.vision_thread = VisionProtector()
 
         self.setup_ui()
-        self._connect_worker_signals()  # ← подключаем сигналы воркеров к слотам UI
+        self._connect_worker_signals()
 
         # Авто-обновление счётчика каждые 5 сек
         self.stats_timer = QTimer(self)
@@ -52,16 +54,11 @@ class DashboardPage(QWidget):
         self._flash_count  = 0
         self._flash_timer.timeout.connect(self._do_flash)
 
-    # ──────────────────────────────────────────────────────────────────
-    #  UI
-    # ──────────────────────────────────────────────────────────────────
-
     def setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(40, 40, 40, 40)
         layout.setSpacing(30)
 
-        # Заголовок
         header = QHBoxLayout()
         title  = QLabel("ОБЗОР СИСТЕМЫ")
         title.setStyleSheet(
@@ -71,7 +68,6 @@ class DashboardPage(QWidget):
         header.addStretch()
         layout.addLayout(header)
 
-        # Метрики
         metrics = QHBoxLayout()
         metrics.setSpacing(20)
         self.card_folder  = MetricCard("Целевая директория", "Не задана",  ACCENT_BLUE)
@@ -82,7 +78,6 @@ class DashboardPage(QWidget):
         metrics.addWidget(self.card_status,  1)
         layout.addLayout(metrics)
 
-        # Панель управления
         panel = QFrame()
         panel.setStyleSheet(
             f"QFrame {{ background-color: {BG_SURFACE}; "
@@ -143,17 +138,10 @@ class DashboardPage(QWidget):
         layout.addWidget(panel)
         layout.addStretch()
 
-        # Подключение кнопок
         self.btn_select.clicked.connect(self.choose_directory)
         self.btn_arm.clicked.connect(self.toggle_protection)
 
-    # ──────────────────────────────────────────────────────────────────
-    #  Подключение сигналов воркеров → слоты UI
-    #  ВСЁ межпоточное общение идёт ТОЛЬКО через сигналы Qt.
-    # ──────────────────────────────────────────────────────────────────
-
     def _connect_worker_signals(self):
-        # VisionProtector
         self.vision_thread.phone_detected.connect(self._on_phone_detected)
         self.vision_thread.camera_error.connect(
             lambda msg: self._log_and_notify("AI Vision", msg, level="High")
@@ -162,12 +150,10 @@ class DashboardPage(QWidget):
             lambda active: print(f"[VISION] {'запущен' if active else 'остановлен'}")
         )
 
-        # ClipboardGuard
         self.clip_guard.violation_detected.connect(
             lambda msg, _: self._log_and_notify("Clipboard Guard", msg, level="High")
         )
 
-        # USBMonitor
         self.usb_monitor.device_connected.connect(self._on_usb_connected)
         self.usb_monitor.device_disconnected.connect(
             lambda drive: self._log_and_notify(
@@ -175,26 +161,19 @@ class DashboardPage(QWidget):
             )
         )
 
-        # FolderWatcher — сигнал (policy_id, message)
         self.watcher.incident_detected.connect(self._on_file_incident)
 
-    # ──────────────────────────────────────────────────────────────────
-    #  Слоты (вызываются из основного потока UI через очередь сигналов)
-    # ──────────────────────────────────────────────────────────────────
-
     def _on_file_incident(self, policy_id: int, message: str):
-        """Реакция на событие файловой системы: лог + Telegram если критично."""
         level_map = {1: "Critical", 2: "High", 3: "Low"}
         level = level_map.get(policy_id, "Medium")
         self._log_and_notify("File Watcher", message, level=level)
-        if policy_id in (1, 2):                     # только критичные — в Telegram
+        if policy_id in (1, 2):
             send_telegram_alert(message)
 
     def _on_phone_detected(self, message: str, photo_path: str):
-        """Реакция на телефон: лог + мигание + Telegram."""
         self._log_and_notify("AI Vision", message, level="Critical")
-        self._start_flash()                              # мигание экрана
-        send_telegram_alert(message, photo_path)        # Telegram с фото
+        self._start_flash()
+        send_telegram_alert(message, photo_path)
 
     def _on_usb_connected(self, drive: str):
         msg = f"⚠️ USB-носитель подключён: {drive or 'неизвестный диск'}"
@@ -202,34 +181,24 @@ class DashboardPage(QWidget):
         send_telegram_alert(msg)
 
     def _log_and_notify(self, module: str, description: str, level: str = "Medium"):
-        """Единая точка записи инцидента в БД и обновления UI."""
-        level_map = {"Low": 1, "Medium": 2, "High": 3, "Critical": 3}
+        level_map = {"Critical": 1, "High": 1, "Medium": 2, "Low": 3}
         self.db.log_incident(level_map.get(level, 2), f"[{module}] {description}")
         self.update_stats()
 
-    # ──────────────────────────────────────────────────────────────────
-    #  Мигание экрана (тревога при детекции телефона)
-    # ──────────────────────────────────────────────────────────────────
-
     def _start_flash(self):
-        """Запускает 6 миганий (3 цикла красный/нормальный)."""
         self._flash_count = 6
-        self._flash_timer.start(200)  # 200 мс между сменами
+        self._flash_timer.start(200)
 
     def _do_flash(self):
         if self._flash_count <= 0:
             self._flash_timer.stop()
-            self.setStyleSheet("")  # сбрасываем стиль
+            self.setStyleSheet("")
             return
         if self._flash_count % 2 == 0:
-            self.setStyleSheet("background-color: #7F1D1D;")  # тёмно-красный
+            self.setStyleSheet("background-color: #7F1D1D;")
         else:
             self.setStyleSheet("")
         self._flash_count -= 1
-
-    # ──────────────────────────────────────────────────────────────────
-    #  Управление защитой
-    # ──────────────────────────────────────────────────────────────────
 
     def choose_directory(self):
         folder = QFileDialog.getExistingDirectory(self, "Выберите целевую директорию")
@@ -237,6 +206,14 @@ class DashboardPage(QWidget):
             self.target_folder = folder
             name = os.path.basename(folder) or folder
             self.card_folder.lbl_value.setText(f"/{name}")
+            set_config_value("protected_folder", folder)
+    
+    def restore_folder(self, folder_path: str):
+        if folder_path and os.path.exists(folder_path):
+            self.target_folder = folder_path
+            name = os.path.basename(folder_path) or folder_path
+            self.card_folder.lbl_value.setText(f"/{name}")
+            print(f"[DASH] Восстановлена папка из конфига: {folder_path}")
 
     def toggle_protection(self):
         if not self.target_folder:
@@ -255,7 +232,6 @@ class DashboardPage(QWidget):
         self.update_stats()
 
     def _read_policies(self) -> dict:
-        """Читаем состояние переключателей политик из PoliciesPage."""
         p = self.window().page_policies
         return {
             "file_lock": p.policy_file_lock.is_active(),
@@ -276,7 +252,6 @@ class DashboardPage(QWidget):
             self.clip_guard.start()
         
         if policies["usb"]:
-            # Пересоздаём поток (QThread нельзя перезапустить)
             self.usb_monitor = USBMonitor()
             self.usb_monitor.device_connected.connect(self._on_usb_connected)
             self.usb_monitor.device_disconnected.connect(
@@ -341,7 +316,6 @@ class DashboardPage(QWidget):
                 f"color: {STATUS_DANGER}; font-size: 28px; font-weight: bold; border: none;"
             )
 
-    # Удалённое управление через Telegram-бота
     def remote_arm(self):
         if not self.btn_arm.isChecked():
             self.btn_arm.setChecked(True)
@@ -452,6 +426,7 @@ class LogsPage(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setShowGrid(False)
         self.table.verticalHeader().setVisible(False)
+        
         self.table.setStyleSheet(
             f"QTableWidget {{ background-color: {BG_SURFACE}; border: 1px solid {BORDER_COLOR}; "
             f"border-radius: 8px; color: {TEXT_PRIMARY}; font-size: 12px; }}"
@@ -492,56 +467,157 @@ class LogsPage(QWidget):
 #  НАСТРОЙКИ
 # ══════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════
+#  НАСТРОЙКИ
+# ══════════════════════════════════════════════════════════════════════
+
 class SettingsPage(QWidget):
     def __init__(self):
         super().__init__()
         self.setup_ui()
 
     def setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(40, 40, 40, 40)
-        layout.setSpacing(25)
+        # Главный слой страницы
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(40, 40, 40, 40)
+        main_layout.setSpacing(25)
 
         title = QLabel("НАСТРОЙКИ СИСТЕМЫ")
-        title.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 22px; font-weight: bold;")
-        layout.addWidget(title)
+        title.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 24px; font-weight: bold;")
+        main_layout.addWidget(title)
 
-        # Безопасность
-        pin_box = QGroupBox("Безопасность администратора")
-        pin_box.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; border: 1px solid {BORDER_COLOR}; padding: 15px; font-weight: bold;"
-        )
-        pin_layout = QVBoxLayout()
+        # ── БЛОК 1: Безопасность ──────────────────────────────────────
+        pin_frame = QFrame()
+        pin_frame.setStyleSheet(f"QFrame {{ background-color: {BG_SURFACE}; border: 1px solid {BORDER_COLOR}; border-radius: 8px; }}")
+        pin_layout = QVBoxLayout(pin_frame)
+        pin_layout.setContentsMargins(25, 25, 25, 25)
+        pin_layout.setSpacing(15)
+
+        lbl_pin = QLabel("Безопасность администратора")
+        lbl_pin.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 16px; font-weight: bold; border: none; background: transparent;")
+        pin_layout.addWidget(lbl_pin)
 
         self.pin_input = QLineEdit()
-        self.pin_input.setPlaceholderText("Введите новый Master-PIN")
+        self.pin_input.setPlaceholderText("Новый PIN-код (мин. 4 символа)")
         self.pin_input.setEchoMode(QLineEdit.Password)
+        self.pin_input.setMinimumHeight(45) # Резиновая высота, не сломается от масштаба
         self.pin_input.setStyleSheet(
-            "padding: 10px; background: #1E293B; color: white; border-radius: 5px; border: 1px solid #334155;"
+            f"QLineEdit {{ padding: 0 15px; background: {BG_BASE}; color: {TEXT_PRIMARY}; border-radius: 6px; border: 1px solid {BORDER_COLOR}; font-size: 15px; }}"
+            f"QLineEdit:focus {{ border: 1px solid {ACCENT_BLUE}; }}"
         )
-
-        btn_save = QPushButton("ОБНОВИТЬ КОНФИГУРАЦИЮ")
-        btn_save.setCursor(Qt.PointingHandCursor)
-        btn_save.setStyleSheet(
-            f"background-color: {ACCENT_BLUE}; color: white; padding: 12px; font-weight: bold; border-radius: 4px;"
-        )
-
-        pin_layout.addWidget(QLabel("Управление доступом (PIN-код):"))
         pin_layout.addWidget(self.pin_input)
-        pin_layout.addWidget(btn_save)
-        pin_box.setLayout(pin_layout)
-        layout.addWidget(pin_box)
 
-        # Аппаратное обеспечение
-        info_box = QGroupBox("Аппаратное ускорение")
-        info_box.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; border: 1px solid {BORDER_COLOR}; padding: 15px; font-weight: bold;"
+        self.pin_confirm = QLineEdit()
+        self.pin_confirm.setPlaceholderText("Повторите PIN-код")
+        self.pin_confirm.setEchoMode(QLineEdit.Password)
+        self.pin_confirm.setMinimumHeight(45)
+        self.pin_confirm.setStyleSheet(
+            f"QLineEdit {{ padding: 0 15px; background: {BG_BASE}; color: {TEXT_PRIMARY}; border-radius: 6px; border: 1px solid {BORDER_COLOR}; font-size: 15px; }}"
+            f"QLineEdit:focus {{ border: 1px solid {ACCENT_BLUE}; }}"
         )
-        info_layout = QVBoxLayout()
-        info_layout.addWidget(QLabel("AI Engine: YOLOv8 Nano (yolov8n.pt)"))
-        info_layout.addWidget(QLabel(f"Storage: {os.getenv('DATABASE_NAME', 'dlp_logs.db')}"))
-        info_layout.addWidget(QLabel("Evidence: _INTRUDERS/ (jpg кадры с камеры)"))
-        info_box.setLayout(info_layout)
-        layout.addWidget(info_box)
+        pin_layout.addWidget(self.pin_confirm)
 
-        layout.addStretch()
+        self.pin_status = QLabel("")
+        self.pin_status.setStyleSheet("font-size: 13px; color: #94A3B8; border: none; background: transparent;")
+        pin_layout.addWidget(self.pin_status)
+
+        btn_save = QPushButton("ОБНОВИТЬ PIN-КОД")
+        btn_save.setCursor(Qt.PointingHandCursor)
+        btn_save.setMinimumHeight(45)
+        btn_save.setStyleSheet(
+            f"QPushButton {{ background-color: {ACCENT_BLUE}; color: white; font-weight: bold; font-size: 14px; border-radius: 6px; border: none; }}"
+            f"QPushButton:hover {{ background-color: #2563EB; }}"
+        )
+        btn_save.clicked.connect(self._save_pin)
+        pin_layout.addWidget(btn_save)
+
+        main_layout.addWidget(pin_frame)
+
+        # ── БЛОК 2: Автозапуск ────────────────────────────────────────
+        auto_frame = QFrame()
+        auto_frame.setStyleSheet(f"QFrame {{ background-color: {BG_SURFACE}; border: 1px solid {BORDER_COLOR}; border-radius: 8px; }}")
+        auto_layout = QVBoxLayout(auto_frame)
+        auto_layout.setContentsMargins(25, 25, 25, 25)
+        auto_layout.setSpacing(15)
+
+        lbl_auto = QLabel("Запуск при старте Windows")
+        lbl_auto.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 16px; font-weight: bold; border: none; background: transparent;")
+        auto_layout.addWidget(lbl_auto)
+
+        self.cb_autostart = QCheckBox(" Запускать SecureCopyGuard при включении ПК")
+        self.cb_autostart.setChecked(autostart_is_enabled())
+        self.cb_autostart.setStyleSheet(
+            f"QCheckBox {{ font-size: 15px; color: {TEXT_PRIMARY}; border: none; background: transparent; }}"
+            f"QCheckBox::indicator {{ width: 22px; height: 22px; border: 2px solid {BORDER_COLOR}; border-radius: 4px; background: {BG_BASE}; }}"
+            f"QCheckBox::indicator:checked {{ background: {ACCENT_BLUE}; border-color: {ACCENT_BLUE}; }}"
+        )
+        self.cb_autostart.stateChanged.connect(self._toggle_autostart)
+        auto_layout.addWidget(self.cb_autostart)
+
+        self.autostart_status = QLabel("")
+        self.autostart_status.setStyleSheet("font-size: 13px; color: #94A3B8; border: none; background: transparent;")
+        auto_layout.addWidget(self.autostart_status)
+
+        main_layout.addWidget(auto_frame)
+
+        # ── БЛОК 3: Инфо ──────────────────────────────────────────────
+        info_frame = QFrame()
+        info_frame.setStyleSheet(f"QFrame {{ background-color: {BG_SURFACE}; border: 1px solid {BORDER_COLOR}; border-radius: 8px; }}")
+        info_layout = QVBoxLayout(info_frame)
+        info_layout.setContentsMargins(25, 25, 25, 25)
+        info_layout.setSpacing(10)
+
+        lbl_info = QLabel("Аппаратное ускорение")
+        lbl_info.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 16px; font-weight: bold; border: none; background: transparent;")
+        info_layout.addWidget(lbl_info)
+
+        lbl_style = f"font-size: 14px; color: {TEXT_MUTED}; border: none; background: transparent;"
+        i1 = QLabel("• AI Engine: YOLOv8 Nano (yolov8n.pt)")
+        i1.setStyleSheet(lbl_style)
+        i2 = QLabel("• Storage: dlp_logs.db")
+        i2.setStyleSheet(lbl_style)
+        i3 = QLabel("• Evidence: _INTRUDERS/ (jpg кадры с камеры)")
+        i3.setStyleSheet(lbl_style)
+
+        info_layout.addWidget(i1)
+        info_layout.addWidget(i2)
+        info_layout.addWidget(i3)
+
+        main_layout.addWidget(info_frame)
+        main_layout.addStretch()
+
+    # ── Функционал кнопок ─────────────────────────────────────────────
+    def _save_pin(self):
+        p1 = self.pin_input.text().strip()
+        p2 = self.pin_confirm.text().strip()
+        if not p1:
+            self.pin_status.setText("❌ Введите PIN.")
+            self.pin_status.setStyleSheet("font-size: 14px; color: #EF4444; border: none; background: transparent;")
+            return
+        if len(p1) < 4:
+            self.pin_status.setText("❌ PIN должен быть не короче 4 символов.")
+            self.pin_status.setStyleSheet("font-size: 14px; color: #EF4444; border: none; background: transparent;")
+            return
+        if p1 != p2:
+            self.pin_status.setText("❌ PIN-коды не совпадают.")
+            self.pin_status.setStyleSheet("font-size: 14px; color: #EF4444; border: none; background: transparent;")
+            return
+        set_config_value("pin_hash", hash_pin(p1))
+        self.pin_input.clear()
+        self.pin_confirm.clear()
+        self.pin_status.setText("✅ PIN успешно обновлён.")
+        self.pin_status.setStyleSheet("font-size: 14px; color: #10B981; border: none; background: transparent;")
+
+    def _toggle_autostart(self, state):
+        if state == Qt.Checked:
+            ok = enable_autostart()
+            set_config_value("autostart", True)
+            msg = "✅ Автозапуск включён." if ok else "❌ Ошибка включения автозапуска."
+            color = "#10B981" if ok else "#EF4444"
+        else:
+            ok = disable_autostart()
+            set_config_value("autostart", False)
+            msg = "✅ Автозапуск отключён." if ok else "❌ Ошибка отключения автозапуска."
+            color = "#10B981" if ok else "#EF4444"
+        self.autostart_status.setText(msg)
+        self.autostart_status.setStyleSheet(f"font-size: 13px; color: {color}; border: none; background: transparent;")

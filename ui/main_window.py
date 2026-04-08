@@ -1,149 +1,192 @@
 # ui/main_window.py
 
-from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QPushButton, QLabel, QFrame,
-                             QButtonGroup, QStackedWidget)
-from PyQt5.QtCore import Qt, QPoint
-
+from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QDialog, QLabel, QLineEdit
+from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtGui import QIcon, QFont
 from ui.pages import DashboardPage, PoliciesPage, LogsPage, SettingsPage
-from ui.theme import MAIN_STYLESHEET
-from db.database import Database
+from ui.theme import *
+from config import verify_pin, get_config_value
+
+# ── Диалог ввода PIN-кода ──────────────────────────────────────────
+class UnlockDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Блокировка DLP")
+        self.setFixedSize(380, 230) # Сделали окно просторнее
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        
+        # Задаем стиль только самому окну QDialog, чтобы не ломать детей
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {BG_SURFACE}; border: 2px solid {BORDER_COLOR}; border-radius: 8px; }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 30, 30, 30) # Добавили воздух по краям
+        layout.setSpacing(15) # Отступы между элементами
+        
+        lbl = QLabel("🛡️ Введите Master-PIN для выхода:")
+        lbl.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 15px; font-weight: bold; border: none; background: transparent;")
+        layout.addWidget(lbl)
+
+        self.pin_input = QLineEdit()
+        self.pin_input.setEchoMode(QLineEdit.Password)
+        self.pin_input.setPlaceholderText("PIN-код")
+        self.pin_input.setFixedHeight(45) # Делаем поле ввода высоким и удобным
+        self.pin_input.setStyleSheet(
+            f"QLineEdit {{ padding: 0 15px; background: {BG_BASE}; color: {TEXT_PRIMARY}; "
+            f"border-radius: 6px; border: 1px solid {BORDER_COLOR}; font-size: 16px; letter-spacing: 5px; }}"
+            f"QLineEdit:focus {{ border: 1px solid {ACCENT_BLUE}; }}"
+        )
+        layout.addWidget(self.pin_input)
+
+        self.err_lbl = QLabel("")
+        self.err_lbl.setStyleSheet(f"color: {STATUS_DANGER}; font-size: 13px; border: none; background: transparent;")
+        self.err_lbl.setFixedHeight(20) # Фиксируем высоту, чтобы элементы не прыгали при ошибке
+        layout.addWidget(self.err_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(15)
+
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setCursor(Qt.PointingHandCursor)
+        btn_cancel.setFixedHeight(40)
+        btn_cancel.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {TEXT_PRIMARY}; border: 1px solid {BORDER_COLOR}; "
+            f"border-radius: 6px; font-weight: bold; font-size: 13px; }}"
+            f"QPushButton:hover {{ background: {BG_BASE}; }}"
+        )
+        btn_cancel.clicked.connect(self.reject)
+
+        btn_ok = QPushButton("Подтвердить")
+        btn_ok.setCursor(Qt.PointingHandCursor)
+        btn_ok.setFixedHeight(40)
+        btn_ok.setStyleSheet(
+            f"QPushButton {{ background: {STATUS_DANGER}; color: white; border: none; "
+            f"border-radius: 6px; font-weight: bold; font-size: 13px; }}"
+            f"QPushButton:hover {{ background: #DC2626; }}"
+        )
+        btn_ok.clicked.connect(self.check)
+
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        layout.addLayout(btn_row)
+
+    def check(self):
+        entered = self.pin_input.text().strip()
+        if verify_pin(entered):
+            self.accept()
+        else:
+            self.err_lbl.setText("❌ Неверный PIN-код!")
+            self.pin_input.clear()
 
 
+# ── Главное окно программы ─────────────────────────────────────────
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.FramelessWindowHint)
-        self.resize(1100, 700)
-        self.setStyleSheet(MAIN_STYLESHEET)
-        self.oldPos = self.pos()
+        self.setWindowTitle("SecureCopyGuard - DLP Core")
+        self.setMinimumSize(1100, 700)
+        self.setStyleSheet(f"background-color: {BG_BASE};")
+        
+        self.tg_bot = None
 
-        # Инициализируем страницы ДО setup_ui
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QHBoxLayout(main_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Боковое меню
+        self.sidebar = QWidget()
+        self.sidebar.setFixedWidth(260)
+        self.sidebar.setStyleSheet(f"background-color: {BG_SURFACE}; border-right: 1px solid {BORDER_COLOR};")
+        sidebar_layout = QVBoxLayout(self.sidebar)
+        sidebar_layout.setContentsMargins(0, 30, 0, 30)
+        sidebar_layout.setSpacing(10)
+
+        logo_lbl = QLabel("SecureCopyGuard")
+        logo_lbl.setStyleSheet(f"color: {ACCENT_BLUE}; font-size: 20px; font-weight: 800; padding: 0 20px 20px 20px; border: none;")
+        sidebar_layout.addWidget(logo_lbl)
+
+        self.btn_dash     = self._create_nav_btn("Обзор системы")
+        self.btn_policies = self._create_nav_btn("Политики")
+        self.btn_logs     = self._create_nav_btn("Журнал событий")
+        self.btn_settings = self._create_nav_btn("Настройки")
+
+        sidebar_layout.addWidget(self.btn_dash)
+        sidebar_layout.addWidget(self.btn_policies)
+        sidebar_layout.addWidget(self.btn_logs)
+        sidebar_layout.addWidget(self.btn_settings)
+        sidebar_layout.addStretch()
+
+        # Версия
+        version_lbl = QLabel("v2.1 Enterprise")
+        version_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; padding: 0 20px; border: none;")
+        sidebar_layout.addWidget(version_lbl)
+
+        main_layout.addWidget(self.sidebar)
+
+        # Область контента
+        self.stack = QStackedWidget()
         self.page_dash     = DashboardPage()
         self.page_policies = PoliciesPage()
         self.page_logs     = LogsPage()
         self.page_settings = SettingsPage()
 
-        self.setup_ui()
+        self.stack.addWidget(self.page_dash)
+        self.stack.addWidget(self.page_policies)
+        self.stack.addWidget(self.page_logs)
+        self.stack.addWidget(self.page_settings)
 
-    def setup_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        main_layout.addWidget(self.stack)
 
-        # ── Title bar ──────────────────────────────────────────────────
-        title_bar = QFrame()
-        title_bar.setObjectName("TitleBar")
-        title_bar.setFixedHeight(35)
-        tb_layout = QHBoxLayout(title_bar)
-        tb_layout.setContentsMargins(15, 0, 0, 0)
+        # Сигналы навигации
+        self.btn_dash.clicked.connect(lambda: self._switch_page(0, self.btn_dash))
+        self.btn_policies.clicked.connect(lambda: self._switch_page(1, self.btn_policies))
+        self.btn_logs.clicked.connect(lambda: self._switch_page(2, self.btn_logs))
+        self.btn_settings.clicked.connect(lambda: self._switch_page(3, self.btn_settings))
 
-        title_lbl = QLabel("SECURE COPY GUARD :: DLP SYSTEM")
-        title_lbl.setObjectName("TitleLabel")
+        self._switch_page(0, self.btn_dash)
 
-        btn_min = QPushButton("—")
-        btn_min.setObjectName("WindowBtn")
-        btn_min.setFixedSize(45, 35)
-        btn_min.clicked.connect(self.showMinimized)
-
-        btn_close = QPushButton("✕")
-        btn_close.setObjectName("CloseBtn")
-        btn_close.setFixedSize(45, 35)
-        btn_close.clicked.connect(self.close)
-
-        tb_layout.addWidget(title_lbl)
-        tb_layout.addStretch()
-        tb_layout.addWidget(btn_min)
-        tb_layout.addWidget(btn_close)
-
-        # ── Sidebar + content ──────────────────────────────────────────
-        work_area   = QFrame()
-        work_layout = QHBoxLayout(work_area)
-        work_layout.setContentsMargins(0, 0, 0, 0)
-        work_layout.setSpacing(0)
-
-        sidebar = QFrame()
-        sidebar.setObjectName("SideBar")
-        sidebar.setFixedWidth(220)
-        sb_layout = QVBoxLayout(sidebar)
-        sb_layout.setContentsMargins(0, 20, 0, 20)
-        sb_layout.setSpacing(2)
-
-        nav_lbl = QLabel("НАВИГАЦИЯ")
-        nav_lbl.setStyleSheet(
-            "color: #64748B; font-size: 10px; font-weight: bold; "
-            "padding-left: 20px; margin-bottom: 10px;"
-        )
-        sb_layout.addWidget(nav_lbl)
-
-        self.btn_dash     = self._menu_btn("DASHBOARD")
-        self.btn_policies = self._menu_btn("ПОЛИТИКИ ЗАЩИТЫ")
-        self.btn_logs     = self._menu_btn("ЖУРНАЛ ИНЦИДЕНТОВ")
-        self.btn_settings = self._menu_btn("НАСТРОЙКИ СИСТЕМЫ")
-        self.btn_dash.setChecked(True)
-
-        group = QButtonGroup(self)
-        for idx, btn in enumerate([
-            self.btn_dash, self.btn_policies,
-            self.btn_logs, self.btn_settings
-        ]):
-            group.addButton(btn, idx)
-            sb_layout.addWidget(btn)
-
-        group.buttonClicked[int].connect(self._switch_page)
-        sb_layout.addStretch()
-
-        ver = QLabel("v2.0.0 Pro")
-        ver.setStyleSheet("color: #475569; font-size: 11px; padding-left: 20px;")
-        sb_layout.addWidget(ver)
-
-        self.pages = QStackedWidget()
-        self.pages.setObjectName("ContentArea")
-        for page in [self.page_dash, self.page_policies,
-                     self.page_logs, self.page_settings]:
-            self.pages.addWidget(page)
-
-        work_layout.addWidget(sidebar)
-        work_layout.addWidget(self.pages)
-
-        root.addWidget(title_bar)
-        root.addWidget(work_area)
-
-    def _menu_btn(self, text: str) -> QPushButton:
+    def _create_nav_btn(self, text):
         btn = QPushButton(text)
-        btn.setObjectName("MenuBtn")
-        btn.setCheckable(True)
+        btn.setFixedHeight(50)
         btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(
+            f"QPushButton {{ text-align: left; padding-left: 25px; border: none; font-size: 14px; font-weight: 600; color: {TEXT_MUTED}; background: transparent; }}"
+            f"QPushButton:hover {{ color: {TEXT_PRIMARY}; background-color: rgba(255,255,255,0.02); }}"
+        )
         return btn
 
-    def _switch_page(self, index: int):
-        self.pages.setCurrentIndex(index)
+    def _switch_page(self, index, active_btn):
+        self.stack.setCurrentIndex(index)
+        for btn in [self.btn_dash, self.btn_policies, self.btn_logs, self.btn_settings]:
+            btn.setStyleSheet(
+                f"QPushButton {{ text-align: left; padding-left: 25px; border: none; font-size: 14px; font-weight: 600; color: {TEXT_MUTED}; background: transparent; }}"
+                f"QPushButton:hover {{ color: {TEXT_PRIMARY}; background-color: rgba(255,255,255,0.02); }}"
+            )
+        active_btn.setStyleSheet(
+            f"QPushButton {{ text-align: left; padding-left: 22px; border: none; border-left: 3px solid {ACCENT_BLUE}; "
+            f"font-size: 14px; font-weight: 600; color: {TEXT_PRIMARY}; background-color: rgba(59, 130, 246, 0.1); }}"
+        )
+        if index == 2:
+            self.page_logs.refresh_all()
 
-    # ── Перетаскивание окна ────────────────────────────────────────────
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and event.pos().y() < 35:
-            self.oldPos = event.globalPos()
-
-    def mouseMoveEvent(self, event):
-        if not self.oldPos.isNull():
-            delta = event.globalPos() - self.oldPos
-            self.move(self.x() + delta.x(), self.y() + delta.y())
-            self.oldPos = event.globalPos()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.oldPos = QPoint()
-
-    # ── Корректное завершение ──────────────────────────────────────────
+    # ── ПЕРЕХВАТ ЗАКРЫТИЯ ОКНА (КРЕСТИК / ALT+F4) ────────────────────
     def closeEvent(self, event):
-        """Останавливаем все воркеры перед закрытием окна."""
-        dash = self.page_dash
-        dash.watcher.stop()
-        dash.clip_guard.stop()
-        dash.usb_monitor.stop()
-        dash.vision_thread.stop()
-        dash.stats_timer.stop()
-        Database().close()
-        event.accept()
+        # Проверяем, задан ли вообще PIN-код в системе
+        pin_hash = get_config_value("pin_hash", "")
+        
+        # Если PIN-кода нет, просто разрешаем закрыть
+        if not pin_hash:
+            event.accept()
+            return
+            
+        # Если PIN есть, показываем окно блокировки
+        dialog = UnlockDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            # Юзер ввел правильный пароль
+            event.accept()
+        else:
+            # Юзер нажал отмену или ввел неправильный пароль
+            event.ignore()
