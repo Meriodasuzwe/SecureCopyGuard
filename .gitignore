@@ -42,3 +42,5 @@ env/
 Thumbs.db
 desktop.ini
 $RECYCLE.BIN/
+
+config.json
