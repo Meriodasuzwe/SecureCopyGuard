@@ -1,6 +1,6 @@
 # ui/main_window.py
 
-from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QDialog, QLabel, QLineEdit
+from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QDialog, QLabel, QLineEdit, QFrame
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QIcon, QFont
 from ui.pages import DashboardPage, PoliciesPage, LogsPage, SettingsPage
@@ -12,36 +12,47 @@ class UnlockDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Блокировка DLP")
-        self.setFixedSize(380, 230) # Сделали окно просторнее
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
-        
-        # Задаем стиль только самому окну QDialog, чтобы не ломать детей
-        self.setStyleSheet(f"""
-            QDialog {{ background-color: {BG_SURFACE}; border: 2px solid {BORDER_COLOR}; border-radius: 8px; }}
-        """)
+        self.setAttribute(Qt.WA_TranslucentBackground)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 30, 30, 30) # Добавили воздух по краям
-        layout.setSpacing(15) # Отступы между элементами
-        
+        base_layout = QVBoxLayout(self)
+        base_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.container = QFrame()
+        self.container.setObjectName("MainContainer")
+        self.container.setMinimumWidth(420)
+        self.container.setStyleSheet(f"""
+            QFrame#MainContainer {{
+                background-color: {BG_SURFACE};
+                border: 2px solid {BORDER_COLOR};
+                border-radius: 10px;
+            }}
+        """)
+        base_layout.addWidget(self.container)
+
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(20)
+
         lbl = QLabel("🛡️ Введите Master-PIN для выхода:")
-        lbl.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 15px; font-weight: bold; border: none; background: transparent;")
+        lbl.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 16px; font-weight: bold; border: none; background: transparent;")
+        lbl.setWordWrap(True)
         layout.addWidget(lbl)
 
         self.pin_input = QLineEdit()
         self.pin_input.setEchoMode(QLineEdit.Password)
         self.pin_input.setPlaceholderText("PIN-код")
-        self.pin_input.setFixedHeight(45) # Делаем поле ввода высоким и удобным
+        self.pin_input.setMinimumHeight(50)
         self.pin_input.setStyleSheet(
             f"QLineEdit {{ padding: 0 15px; background: {BG_BASE}; color: {TEXT_PRIMARY}; "
-            f"border-radius: 6px; border: 1px solid {BORDER_COLOR}; font-size: 16px; letter-spacing: 5px; }}"
+            f"border-radius: 6px; border: 1px solid {BORDER_COLOR}; font-size: 18px; letter-spacing: 5px; }}"
             f"QLineEdit:focus {{ border: 1px solid {ACCENT_BLUE}; }}"
         )
         layout.addWidget(self.pin_input)
 
         self.err_lbl = QLabel("")
-        self.err_lbl.setStyleSheet(f"color: {STATUS_DANGER}; font-size: 13px; border: none; background: transparent;")
-        self.err_lbl.setFixedHeight(20) # Фиксируем высоту, чтобы элементы не прыгали при ошибке
+        self.err_lbl.setStyleSheet(f"color: {STATUS_DANGER}; font-size: 14px; border: none; background: transparent;")
+        self.err_lbl.setMinimumHeight(20)
         layout.addWidget(self.err_lbl)
 
         btn_row = QHBoxLayout()
@@ -49,20 +60,20 @@ class UnlockDialog(QDialog):
 
         btn_cancel = QPushButton("Отмена")
         btn_cancel.setCursor(Qt.PointingHandCursor)
-        btn_cancel.setFixedHeight(40)
+        btn_cancel.setMinimumHeight(45)
         btn_cancel.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {TEXT_PRIMARY}; border: 1px solid {BORDER_COLOR}; "
-            f"border-radius: 6px; font-weight: bold; font-size: 13px; }}"
-            f"QPushButton:hover {{ background: {BG_BASE}; }}"
+            f"QPushButton {{ background: {BG_BASE}; color: {TEXT_PRIMARY}; border: 1px solid {BORDER_COLOR}; "
+            f"border-radius: 6px; font-weight: bold; font-size: 14px; }}"
+            f"QPushButton:hover {{ background: #334155; }}"
         )
         btn_cancel.clicked.connect(self.reject)
 
         btn_ok = QPushButton("Подтвердить")
         btn_ok.setCursor(Qt.PointingHandCursor)
-        btn_ok.setFixedHeight(40)
+        btn_ok.setMinimumHeight(45)
         btn_ok.setStyleSheet(
             f"QPushButton {{ background: {STATUS_DANGER}; color: white; border: none; "
-            f"border-radius: 6px; font-weight: bold; font-size: 13px; }}"
+            f"border-radius: 6px; font-weight: bold; font-size: 14px; }}"
             f"QPushButton:hover {{ background: #DC2626; }}"
         )
         btn_ok.clicked.connect(self.check)
@@ -70,6 +81,7 @@ class UnlockDialog(QDialog):
         btn_row.addWidget(btn_cancel)
         btn_row.addWidget(btn_ok)
         layout.addLayout(btn_row)
+        self.adjustSize()
 
     def check(self):
         entered = self.pin_input.text().strip()
@@ -174,7 +186,6 @@ class MainWindow(QMainWindow):
 
     # ── ПЕРЕХВАТ ЗАКРЫТИЯ ОКНА (КРЕСТИК / ALT+F4) ────────────────────
     def closeEvent(self, event):
-        # Проверяем, задан ли вообще PIN-код в системе
         pin_hash = get_config_value("pin_hash", "")
         
         # Если PIN-кода нет, просто разрешаем закрыть
@@ -185,8 +196,7 @@ class MainWindow(QMainWindow):
         # Если PIN есть, показываем окно блокировки
         dialog = UnlockDialog(self)
         if dialog.exec_() == QDialog.Accepted:
-            # Юзер ввел правильный пароль
             event.accept()
         else:
-            # Юзер нажал отмену или ввел неправильный пароль
+            # ТУТ МЫ ПОТОМ ДОБАВИМ ЛОГИКУ ФОТО-ЛОВУШКИ ПРИ ОТМЕНЕ
             event.ignore()

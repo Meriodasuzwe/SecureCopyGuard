@@ -1,4 +1,7 @@
 @echo off
+:: Включаем поддержку кодировки UTF-8 в консоли (чтобы не было кракозябр)
+chcp 65001 >nul
+
 title Сборка SecureCopyGuard в EXE
 
 echo [1/2] Установка компилятора PyInstaller...

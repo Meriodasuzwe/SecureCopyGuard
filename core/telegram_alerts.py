@@ -6,6 +6,9 @@ import threading
 import requests
 from pathlib import Path
 
+# ИМПОРТИРУЕМ ФУНКЦИИ ИЗ КОНФИГА!
+from config import get_telegram_token, get_telegram_chat_id
+
 
 class TelegramAlerter:
     """
@@ -14,7 +17,6 @@ class TelegramAlerter:
     Поддерживает очередь сообщений и отправку фото-доказательств.
     """
 
-    API_BASE  = "https://api.telegram.org/bot{token}"
     TIMEOUT   = 10  # секунд на запрос
     MAX_RETRY = 3
 
@@ -22,19 +24,9 @@ class TelegramAlerter:
         self.token   = token
         self.chat_id = chat_id
         self._base   = f"https://api.telegram.org/bot{token}"
-
-        # Лёгкая блокировка чтобы не дёргать API параллельно
         self._lock = threading.Lock()
 
-    # ------------------------------------------------------------------
-    # Публичный интерфейс
-    # ------------------------------------------------------------------
-
     def send_alert(self, message: str, photo_path: str | None = None):
-        """
-        Отправляет уведомление в отдельном потоке.
-        photo_path — путь к jpg-файлу (необязательно).
-        """
         t = threading.Thread(
             target=self._send_safe,
             args=(message, photo_path),
@@ -43,12 +35,7 @@ class TelegramAlerter:
         )
         t.start()
 
-    # ------------------------------------------------------------------
-    # Внутренние методы
-    # ------------------------------------------------------------------
-
     def _send_safe(self, message: str, photo_path: str | None):
-        """Отправка с повторными попытками при сбое сети."""
         with self._lock:
             for attempt in range(1, self.MAX_RETRY + 1):
                 try:
@@ -60,7 +47,7 @@ class TelegramAlerter:
                 except requests.RequestException as exc:
                     print(f"[TELEGRAM] Попытка {attempt}/{self.MAX_RETRY} неудачна: {exc}")
                     if attempt < self.MAX_RETRY:
-                        time.sleep(2 * attempt)  # экспоненциальный backoff
+                        time.sleep(2 * attempt)  
 
     def _send_text(self, message: str):
         resp = requests.post(
@@ -89,28 +76,13 @@ class TelegramAlerter:
         resp.raise_for_status()
 
 
-# ------------------------------------------------------------------
-# Удобная фабрика — создаётся один раз из config
-# ------------------------------------------------------------------
-
-_instance: TelegramAlerter | None = None
-
-
-def get_alerter() -> TelegramAlerter | None:
-    """Возвращает синглтон-алертер, если токен настроен."""
-    global _instance
-    if _instance is None:
-        token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-        if token and chat_id:
-            _instance = TelegramAlerter(token, chat_id)
-    return _instance
-
-
 def send_telegram_alert(message: str, photo_path: str | None = None):
-    """Глобальная функция для обратной совместимости с остальными модулями."""
-    alerter = get_alerter()
-    if alerter:
+    """Глобальная функция. Всегда берет свежий токен из конфига."""
+    token   = get_telegram_token()
+    chat_id = get_telegram_chat_id()
+    
+    if token and chat_id:
+        alerter = TelegramAlerter(token, chat_id)
         alerter.send_alert(message, photo_path)
     else:
         print(f"[TELEGRAM] Токен не настроен, уведомление не отправлено: {message}")

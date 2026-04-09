@@ -12,13 +12,12 @@ CS_VREDRAW               = 0x0001
 CS_HREDRAW               = 0x0002
 
 WNDPROC = ctypes.WINFUNCTYPE(
-    ctypes.c_long,
+    ctypes.c_ssize_t,
     wintypes.HWND,
     wintypes.UINT,
     wintypes.WPARAM,
     wintypes.LPARAM,
 )
-
 
 class WNDCLASSW(ctypes.Structure):
     _fields_ = [
@@ -34,14 +33,12 @@ class WNDCLASSW(ctypes.Structure):
         ("lpszClassName", wintypes.LPCWSTR),
     ]
 
-
 class DEV_BROADCAST_HDR(ctypes.Structure):
     _fields_ = [
         ("dbch_size",       wintypes.DWORD),
         ("dbch_devicetype", wintypes.DWORD),
         ("dbch_reserved",   wintypes.DWORD),
     ]
-
 
 class DEV_BROADCAST_VOLUME(ctypes.Structure):
     _fields_ = [
@@ -51,7 +48,6 @@ class DEV_BROADCAST_VOLUME(ctypes.Structure):
         ("dbcv_unitmask",   wintypes.DWORD),
         ("dbcv_flags",      wintypes.WORD),
     ]
-
 
 class USBMonitor(QThread):
     device_connected    = pyqtSignal(str)
@@ -75,10 +71,21 @@ class USBMonitor(QThread):
         user32   = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
 
-        self._wndproc_ref = WNDPROC(self._wnd_proc)
+        # ── ФИКС ПЕРЕПОЛНЕНИЯ (OVERFLOW ERROR) ───────────────────────
+        kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
+        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        
+        user32.CreateWindowExW.restype = wintypes.HWND
+        # Жестко прописываем типы всех 12 аргументов для CreateWindowExW
+        user32.CreateWindowExW.argtypes = [
+            wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.HWND, wintypes.HANDLE, wintypes.HINSTANCE, wintypes.LPVOID
+        ]
+        # ──────────────────────────────────────────────────────────────
 
-        # Получаем hInstance и сразу приводим к HINSTANCE
-        hinstance = wintypes.HINSTANCE(kernel32.GetModuleHandleW(None))
+        self._wndproc_ref = WNDPROC(self._wnd_proc)
+        hinstance = kernel32.GetModuleHandleW(None)
 
         wc               = WNDCLASSW()
         wc.style         = CS_VREDRAW | CS_HREDRAW
@@ -88,20 +95,19 @@ class USBMonitor(QThread):
 
         if not user32.RegisterClassW(ctypes.byref(wc)):
             err = kernel32.GetLastError()
-            if err != 1410:  # 1410 = уже зарегистрирован — ок
+            if err != 1410:  # 1410 = уже зарегистрирован
                 print(f"[USB] RegisterClassW error: {err}")
                 return
 
-        # Передаём hinstance через ctypes.c_void_p чтобы избежать OverflowError
         self._hwnd = user32.CreateWindowExW(
             0,
             self._CLASS_NAME,
             "DLP USB Monitor",
-            0,           # WS_OVERLAPPED
+            0,
             0, 0, 0, 0,
             None,
             None,
-            hinstance,
+            hinstance, # Теперь ctypes знает, что это 64-битный указатель!
             None
         )
 
@@ -129,7 +135,6 @@ class USBMonitor(QThread):
         print("[USB] USB monitoring stopped.")
 
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
-        # 0x0219 = WM_DEVICECHANGE, 0x8000 = DBT_DEVICEARRIVAL, 0x8004 = DBT_DEVICEREMOVECOMPLETE
         if msg == 0x0219:
             if wparam in (0x8000, 0x8004):
                 drive = self._parse_drive(lparam)
@@ -140,11 +145,9 @@ class USBMonitor(QThread):
                     print(f"[USB] Отключено: {drive}")
                     self.device_disconnected.emit(drive)
         
-        # Явно указываем 64-битные типы, чтобы избежать OverflowError
-        import ctypes.wintypes as wintypes
         user32 = ctypes.windll.user32
         user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-        user32.DefWindowProcW.restype = wintypes.LPARAM
+        user32.DefWindowProcW.restype = ctypes.c_ssize_t
         
         return user32.DefWindowProcW(hwnd, msg, wintypes.WPARAM(wparam), wintypes.LPARAM(lparam))
 

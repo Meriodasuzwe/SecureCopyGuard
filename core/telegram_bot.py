@@ -1,11 +1,13 @@
 # core/telegram_bot.py
 
 import time
+import os
+import ctypes
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import get_telegram_token, get_telegram_chat_id
 from db.database import Database
 
 
@@ -15,13 +17,16 @@ class TelegramAdminBot(QThread):
 
     def __init__(self):
         super().__init__()
-        self.bot        = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=False)
-        self.chat_id    = int(TELEGRAM_CHAT_ID)
+        # Берем данные через функции, чтобы они 100% обновились после Wizard'а
+        self.token      = get_telegram_token()
+        self.chat_id    = int(get_telegram_chat_id())
+        
+        # threaded=False - ОЧЕНЬ ВАЖНО для PyQt. Иначе telebot плодит свои потоки и конфликтует с UI
+        self.bot        = telebot.TeleBot(self.token, threaded=False)
         self.is_running = True
         self._db        = Database()
 
-        # Ссылка на DashboardPage — устанавливается из main.py после создания окна
-        # Используется только для чтения is_armed, не для прямых вызовов UI
+        # Ссылка на DashboardPage — устанавливается из main.py
         self._dashboard = None
 
     def set_dashboard(self, dashboard):
@@ -35,6 +40,8 @@ class TelegramAdminBot(QThread):
             kb = ReplyKeyboardMarkup(resize_keyboard=True)
             kb.add(KeyboardButton("🟢 АКТИВИРОВАТЬ"), KeyboardButton("🔴 ВЫКЛЮЧИТЬ"))
             kb.add(KeyboardButton("📊 СТАТУС"),        KeyboardButton("📋 ОТЧЁТ"))
+            # ── ДОБАВЛЕНЫ КНОПКИ СМЕРТИ ──
+            kb.add(KeyboardButton("💻 БЛОК ПК"),      KeyboardButton("🔌 ВЫРУБИТЬ ПК"))
             return kb
 
         # ── /start ────────────────────────────────────────────────────
@@ -129,13 +136,49 @@ class TelegramAdminBot(QThread):
             except Exception as exc:
                 self.bot.reply_to(m, f"❌ Ошибка: {exc}")
 
-        # ── Polling loop ──────────────────────────────────────────────
+        # ── Блокировка экрана (Lock Windows) ──────────────────────────
+        @self.bot.message_handler(func=lambda m: m.text == "💻 БЛОК ПК")
+        def cmd_lock_pc(m):
+            if m.chat.id != self.chat_id:
+                return
+            
+            # Вызываем системную функцию Windows для немедленной блокировки сеанса (Win + L)
+            ctypes.windll.user32.LockWorkStation()
+            
+            self.bot.reply_to(m, "🔒 *Компьютер немедленно заблокирован!*\nПользователь выкинут на экран ввода пароля Windows.", parse_mode="Markdown")
+            print("[BOT] Выполнена команда: Блокировка ПК")
+
+        # ── Экстренное выключение (Shutdown) ──────────────────────────
+        @self.bot.message_handler(func=lambda m: m.text == "🔌 ВЫРУБИТЬ ПК")
+        def cmd_shutdown_pc(m):
+            if m.chat.id != self.chat_id:
+                return
+            
+            # /s - выключение, /t 10 - через 10 секунд, /c - комментарий на весь экран
+            os.system('shutdown /s /t 10 /c "SECURE COPY GUARD: КРИТИЧЕСКАЯ УГРОЗА УТЕЧКИ. КОМПЬЮТЕР БУДЕТ ВЫКЛЮЧЕН."')
+            
+            self.bot.reply_to(m, "☠️ *Отправлена команда на экстренное ВЫКЛЮЧЕНИЕ!*\nУ нарушителя есть 10 секунд до отключения питания.", parse_mode="Markdown")
+            print("[BOT] Выполнена команда: Выключение ПК")
+
+        # ── Приветствие при запуске программы ─────────────────────────
+        try:
+            # Сразу присылаем клавиатуру, чтобы было удобно тыкать кнопки
+            self.bot.send_message(
+                self.chat_id, 
+                "✅ SecureCopyGuard успешно запущен и подключён к сети!", 
+                reply_markup=_kb()
+            )
+        except Exception as e:
+            print(f"[BOT] Ошибка стартового сообщения: {e}")
+
+        # ── Polling loop (БЕССМЕРТНЫЙ ЦИКЛ) ───────────────────────────
         while self.is_running:
             try:
-                self.bot.polling(none_stop=False, timeout=5, long_polling_timeout=5)
+                # none_stop=True — запрещаем боту сдаваться при мелких ошибках сети!
+                self.bot.polling(none_stop=True, interval=0, timeout=20)
             except Exception as exc:
                 print(f"[BOT ERROR] {exc}")
-                time.sleep(3)   # пауза перед переподключением
+                time.sleep(3)   # пауза 3 секунды перед жестким переподключением
 
     def stop(self):
         self.is_running = False

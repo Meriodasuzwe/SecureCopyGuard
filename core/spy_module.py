@@ -13,25 +13,12 @@ class SpyModule:
     Утилитный класс для:
       - звукового оповещения (siren)
       - снимка с веб-камеры (take_photo)
-
-    ВАЖНО: take_photo() НЕ вызывается когда работает VisionProtector —
-    тот уже держит камеру и сам сохраняет кадры с bounding box.
-    Используется только в FolderWatcher (удаление файла) когда AI-Vision выключен.
     """
 
-    # Общая блокировка камеры — предотвращает одновременное открытие
     _camera_lock = threading.Lock()
 
     @staticmethod
     def take_photo(camera_index: int = 0) -> str | None:
-        """
-        Делает снимок с веб-камеры и сохраняет в INTRUDER_FOLDER.
-        Возвращает путь к файлу или None при ошибке.
-
-        Не вызывайте этот метод пока работает VisionProtector —
-        они конфликтуют за одну камеру.
-        """
-        # Пробуем захватить блокировку без ожидания
         acquired = SpyModule._camera_lock.acquire(blocking=False)
         if not acquired:
             print("[SPY] Камера занята VisionProtector, снимок пропущен.")
@@ -39,7 +26,9 @@ class SpyModule:
 
         cam = None
         try:
-            cam = cv2.VideoCapture(camera_index)
+            # ВАЖНО ДЛЯ WINDOWS: Добавлен cv2.CAP_DSHOW чтобы камера не висла в .exe
+            cam = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+            
             if not cam.isOpened():
                 print("[SPY] Камера недоступна.")
                 return None
@@ -52,10 +41,11 @@ class SpyModule:
             if not ret:
                 return None
 
-            Path(INTRUDER_FOLDER).mkdir(exist_ok=True)
+            Path(INTRUDER_FOLDER).mkdir(exist_ok=True, parents=True)
             filename = f"intruder_{int(time.time())}.jpg"
             filepath = Path(INTRUDER_FOLDER) / filename
             cv2.imwrite(str(filepath), frame)
+            
             print(f"[SPY] Снимок сохранён: {filepath}")
             return str(filepath)
 
@@ -70,10 +60,6 @@ class SpyModule:
 
     @staticmethod
     def play_siren():
-        """
-        Звуковая тревога — три двойных сигнала.
-        Запускается в daemon-потоке, не блокирует вызывающий код.
-        """
         def _beep():
             try:
                 for _ in range(3):
