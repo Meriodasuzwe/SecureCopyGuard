@@ -13,21 +13,23 @@ class SpyModule:
     Утилитный класс для:
       - звукового оповещения (siren)
       - снимка с веб-камеры (take_photo)
+      - снимка экрана (take_screenshot)
     """
 
-    _camera_lock = threading.Lock()
+    # Флаг занятости камеры (управляется из VisionProtector)
+    _camera_busy = False
 
     @staticmethod
     def take_photo(camera_index: int = 0) -> str | None:
-        acquired = SpyModule._camera_lock.acquire(blocking=False)
-        if not acquired:
-            print("[SPY] Камера занята VisionProtector, снимок пропущен.")
+        # СПАСАЕТ ОТ ЗАВИСАНИЯ! Если YOLO работает, даже не трогаем вебку.
+        if SpyModule._camera_busy:
+            print("[SPY] Камера занята AI Vision. Пропускаем фото, делаем скриншот.")
             return None
 
         cam = None
         try:
             # ВАЖНО ДЛЯ WINDOWS: Добавлен cv2.CAP_DSHOW чтобы камера не висла в .exe
-            cam = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+            cam = cv2.VideoCapture(camera_index)
             
             if not cam.isOpened():
                 print("[SPY] Камера недоступна.")
@@ -56,7 +58,6 @@ class SpyModule:
         finally:
             if cam is not None:
                 cam.release()
-            SpyModule._camera_lock.release()
 
     @staticmethod
     def play_siren():
@@ -69,3 +70,30 @@ class SpyModule:
                 print(f"[SPY] Ошибка сирены: {exc}")
 
         threading.Thread(target=_beep, daemon=True, name="Siren").start()
+    
+    @staticmethod
+    def take_screenshot() -> str | None:
+        """
+        Делает скриншот всего рабочего стола в момент инцидента.
+        Идеальное доказательство для кражи файлов или буфера обмена.
+        """
+        from PyQt5.QtWidgets import QApplication
+        from pathlib import Path
+        import time
+
+        try:
+            folder = Path(INTRUDER_FOLDER)
+            folder.mkdir(exist_ok=True, parents=True)
+            filepath = folder / f"screenshot_{int(time.time())}.jpg"
+            
+            # Захватываем главный экран системы
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                pixmap = screen.grabWindow(0)
+                pixmap.save(str(filepath), "JPG", 75) # 75 - сжатие для быстрого Telegram
+                print(f"[SPY] Скриншот доказательства сохранен: {filepath}")
+                return str(filepath)
+            return None
+        except Exception as exc:
+            print(f"[SPY] Ошибка при создании скриншота: {exc}")
+            return None

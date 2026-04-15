@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor
-
+from PyQt5.QtWidgets import QDialog
 from ui.widgets import MetricCard, PolicyCard
 from ui.theme import *
 from db.database import Database
@@ -150,34 +150,47 @@ class DashboardPage(QWidget):
             lambda active: print(f"[VISION] {'запущен' if active else 'остановлен'}")
         )
 
-        self.clip_guard.violation_detected.connect(
-            lambda msg, _: self._log_and_notify("Clipboard Guard", msg, level="High")
-        )
+        # ─── УМНОЕ ДОКАЗАТЕЛЬСТВО (ВЕБКА -> СКРИНШОТ) ───
+        def _on_clipboard_violation(msg, snippet):
+            self._log_and_notify("Clipboard Guard", msg, level="High")
+            self._check_and_play_siren()
+            from core.spy_module import SpyModule
+            
+            # 1. Пытаемся сфоткать лицо (если камера не занята YOLO)
+            photo_path = SpyModule.take_photo() 
+            
+            # 2. Если не вышло (вернулся None), делаем скриншот экрана
+            if not photo_path:
+                photo_path = SpyModule.take_screenshot()
+                
+            # Шлем в телегу то, что удалось заснять
+            send_telegram_alert(f"{msg}\n\nПопытка скопировать:\n{snippet}", photo_path)
 
-        self.usb_monitor.device_connected.connect(self._on_usb_connected)
-        self.usb_monitor.device_disconnected.connect(
-            lambda drive: self._log_and_notify(
-                "USB Guard", f"USB-устройство отключено: {drive or 'неизвестный диск'}", level="Low"
-            )
-        )
-
-        self.watcher.incident_detected.connect(self._on_file_incident)
+        self.clip_guard.violation_detected.connect(_on_clipboard_violation)
+        # ─────────────────────────────────────────────
 
     def _on_file_incident(self, policy_id: int, message: str):
         level_map = {1: "Critical", 2: "High", 3: "Low"}
         level = level_map.get(policy_id, "Medium")
         self._log_and_notify("File Watcher", message, level=level)
+        
+        # Если это High или Critical угроза (удаление или копирование в папку)
         if policy_id in (1, 2):
-            send_telegram_alert(message)
+            self._check_and_play_siren()
+            from core.spy_module import SpyModule
+            photo_path = SpyModule.take_screenshot() # 📸 Делаем скриншот
+            send_telegram_alert(message, photo_path)
 
     def _on_phone_detected(self, message: str, photo_path: str):
         self._log_and_notify("AI Vision", message, level="Critical")
         self._start_flash()
+        self._check_and_play_siren()
         send_telegram_alert(message, photo_path)
 
     def _on_usb_connected(self, drive: str):
         msg = f"⚠️ USB-носитель подключён: {drive or 'неизвестный диск'}"
         self._log_and_notify("USB Guard", msg, level="High")
+        self._check_and_play_siren()
         send_telegram_alert(msg)
 
     def _log_and_notify(self, module: str, description: str, level: str = "Medium"):
@@ -221,6 +234,14 @@ class DashboardPage(QWidget):
             QMessageBox.warning(self, "Ошибка", "Сначала выберите директорию для защиты.")
             return
 
+        # ─── ЗАЩИТА: ЕСЛИ СНИМАЕМ ЗАЩИТУ, ТРЕБУЕМ PIN ───
+        if self.is_armed and not self.btn_arm.isChecked():
+            dialog = PinDialog(self)
+            if dialog.exec_() != QDialog.Accepted:
+                # Ввели неверный PIN или закрыли окошко
+                self.btn_arm.setChecked(True) # Возвращаем кнопку в нажатое состояние
+                return # Прерываем отключение
+
         self.is_armed = self.btn_arm.isChecked()
         policies      = self._read_policies()
 
@@ -243,12 +264,14 @@ class DashboardPage(QWidget):
         }
 
     def _arm(self, policies: dict):
+        self.window().page_policies.save_all_policies()
         if policies["file_lock"]:
             FileLocker.lock_directory(self.target_folder)
         
         self.watcher.start(self.target_folder, use_camera=policies["webcam"])
         
         if policies["clipboard"]:
+            self.clip_guard.set_watched_folder(self.target_folder)
             self.clip_guard.start()
         
         if policies["usb"]:
@@ -325,10 +348,16 @@ class DashboardPage(QWidget):
         if self.btn_arm.isChecked():
             self.btn_arm.setChecked(False)
             self.toggle_protection()
+    
+    def _check_and_play_siren(self):
+        """Проверяет тумблер в UI и включает звук, если разрешено"""
+        if self._read_policies().get("siren"):
+            from core.spy_module import SpyModule
+            SpyModule.play_siren()
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  ПОЛИТИКИ
+#  ПОЛИТИКИ (С памятью состояний)
 # ══════════════════════════════════════════════════════════════════════
 
 class PoliciesPage(QWidget):
@@ -347,31 +376,43 @@ class PoliciesPage(QWidget):
         )
         layout.addWidget(title)
 
+        # ─── Читаем память системы (если запускаем впервые - ставим дефолты) ───
+        s_file = get_config_value("pol_file", True)
+        s_clip = get_config_value("pol_clip", True)
+        s_webc = get_config_value("pol_webcam", True)
+        s_usb  = get_config_value("pol_usb", True)
+        s_ai   = get_config_value("pol_ai", False)    # По умолчанию выключено, но запомнит, если включишь
+        s_siren= get_config_value("pol_siren", False) # По умолчанию выключено, но запомнит, если включишь
+
         self.policy_file_lock = PolicyCard(
             "Блокировка файловой системы (Anti-Delete)",
-            "Жёсткая блокировка файлов через os.chmod — запрет удаления и изменения."
+            "Жёсткая блокировка файлов через os.chmod — запрет удаления и изменения.",
+            default_state=s_file
         )
         self.policy_clipboard = PolicyCard(
             "Контроль буфера обмена (DLP)",
-            "Перехват и блокировка копирования конфиденциальных данных (карты, пароли, email)."
+            "Перехват и блокировка копирования конфиденциальных данных (карты, пароли, email).",
+            default_state=s_clip
         )
         self.policy_webcam = PolicyCard(
             "Фото-фиксация нарушителя (Webcam Trap)",
-            "Снимок с веб-камеры при срабатывании любого из модулей защиты."
+            "Снимок с веб-камеры при срабатывании любого из модулей защиты.",
+            default_state=s_webc
         )
         self.policy_usb = PolicyCard(
             "Контроль внешних носителей (USB Guard)",
-            "Мгновенное уведомление при подключении USB-флешек и дисков."
+            "Мгновенное уведомление при подключении USB-флешек и дисков.",
+            default_state=s_usb
         )
         self.policy_ai_vision = PolicyCard(
             "AI Vision: Детекция гаджетов (YOLOv8)",
             "Нейросеть детектирует смартфоны рядом с экраном — мигание + Telegram-алерт с фото.",
-            default_state=False
+            default_state=s_ai
         )
         self.policy_siren = PolicyCard(
             "Аудио-оповещение (Siren Alarm)",
             "Звуковой сигнал тревоги при обнаружении инцидента.",
-            default_state=False
+            default_state=s_siren
         )
 
         for card in [
@@ -382,6 +423,15 @@ class PoliciesPage(QWidget):
             layout.addWidget(card)
 
         layout.addStretch()
+
+    def save_all_policies(self):
+        """Сохраняет текущее положение всех тумблеров в config.json"""
+        set_config_value("pol_file", self.policy_file_lock.is_active())
+        set_config_value("pol_clip", self.policy_clipboard.is_active())
+        set_config_value("pol_webcam", self.policy_webcam.is_active())
+        set_config_value("pol_usb", self.policy_usb.is_active())
+        set_config_value("pol_ai", self.policy_ai_vision.is_active())
+        set_config_value("pol_siren", self.policy_siren.is_active())
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -464,11 +514,7 @@ class LogsPage(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  НАСТРОЙКИ
-# ══════════════════════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════════════════════
-#  НАСТРОЙКИ
+#  НАСТРОЙКИ (ЖЕЛЕЗОБЕТОННЫЙ UI)
 # ══════════════════════════════════════════════════════════════════════
 
 class SettingsPage(QWidget):
@@ -477,56 +523,79 @@ class SettingsPage(QWidget):
         self.setup_ui()
 
     def setup_ui(self):
-        # Главный слой страницы
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(40, 40, 40, 40)
         main_layout.setSpacing(25)
 
         title = QLabel("НАСТРОЙКИ СИСТЕМЫ")
-        title.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 24px; font-weight: bold;")
+        title.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 24px; font-weight: 800; letter-spacing: 1px;")
         main_layout.addWidget(title)
+
+        # ── ОБЩИЙ СТИЛЬ ──
+        input_style = f"""
+            QLineEdit {{
+                background-color: #0F172A;
+                color: {TEXT_PRIMARY};
+                border-radius: 8px;
+                border: 1px solid #334155;
+                font-size: 15px;
+                padding-left: 15px;
+                letter-spacing: 2px;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {ACCENT_BLUE};
+                background-color: #1E293B;
+            }}
+        """
 
         # ── БЛОК 1: Безопасность ──────────────────────────────────────
         pin_frame = QFrame()
-        pin_frame.setStyleSheet(f"QFrame {{ background-color: {BG_SURFACE}; border: 1px solid {BORDER_COLOR}; border-radius: 8px; }}")
+        pin_frame.setStyleSheet(f"QFrame#PinFrame {{ background-color: {BG_SURFACE}; border: 1px solid {BORDER_COLOR}; border-radius: 12px; }}")
+        pin_frame.setObjectName("PinFrame")
+        
         pin_layout = QVBoxLayout(pin_frame)
-        pin_layout.setContentsMargins(25, 25, 25, 25)
-        pin_layout.setSpacing(15)
+        pin_layout.setContentsMargins(30, 30, 30, 30)
+        pin_layout.setSpacing(15) 
+        # МАГИЯ: Запрещаем сплющивать этот блок!
+        pin_layout.setSizeConstraint(QVBoxLayout.SetMinimumSize)
 
-        lbl_pin = QLabel("Безопасность администратора")
+        lbl_pin = QLabel("🛡️ Управление доступом (Master-PIN)")
         lbl_pin.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 16px; font-weight: bold; border: none; background: transparent;")
         pin_layout.addWidget(lbl_pin)
 
+        self.pin_old = QLineEdit()
+        self.pin_old.setPlaceholderText("Введите текущий PIN-код")
+        self.pin_old.setEchoMode(QLineEdit.Password)
+        self.pin_old.setFixedHeight(45) # ЖЕСТКАЯ ВЫСОТА
+        self.pin_old.setStyleSheet(input_style)
+        pin_layout.addWidget(self.pin_old)
+
         self.pin_input = QLineEdit()
-        self.pin_input.setPlaceholderText("Новый PIN-код (мин. 4 символа)")
+        self.pin_input.setPlaceholderText("Создайте новый PIN-код (мин. 4 цифры)")
         self.pin_input.setEchoMode(QLineEdit.Password)
-        self.pin_input.setMinimumHeight(45) # Резиновая высота, не сломается от масштаба
-        self.pin_input.setStyleSheet(
-            f"QLineEdit {{ padding: 0 15px; background: {BG_BASE}; color: {TEXT_PRIMARY}; border-radius: 6px; border: 1px solid {BORDER_COLOR}; font-size: 15px; }}"
-            f"QLineEdit:focus {{ border: 1px solid {ACCENT_BLUE}; }}"
-        )
+        self.pin_input.setFixedHeight(45) # ЖЕСТКАЯ ВЫСОТА
+        self.pin_input.setStyleSheet(input_style)
         pin_layout.addWidget(self.pin_input)
 
         self.pin_confirm = QLineEdit()
-        self.pin_confirm.setPlaceholderText("Повторите PIN-код")
+        self.pin_confirm.setPlaceholderText("Подтвердите новый PIN-код")
         self.pin_confirm.setEchoMode(QLineEdit.Password)
-        self.pin_confirm.setMinimumHeight(45)
-        self.pin_confirm.setStyleSheet(
-            f"QLineEdit {{ padding: 0 15px; background: {BG_BASE}; color: {TEXT_PRIMARY}; border-radius: 6px; border: 1px solid {BORDER_COLOR}; font-size: 15px; }}"
-            f"QLineEdit:focus {{ border: 1px solid {ACCENT_BLUE}; }}"
-        )
+        self.pin_confirm.setFixedHeight(45) # ЖЕСТКАЯ ВЫСОТА
+        self.pin_confirm.setStyleSheet(input_style)
         pin_layout.addWidget(self.pin_confirm)
 
         self.pin_status = QLabel("")
-        self.pin_status.setStyleSheet("font-size: 13px; color: #94A3B8; border: none; background: transparent;")
+        self.pin_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #94A3B8; border: none; background: transparent;")
+        self.pin_status.setFixedHeight(20)
         pin_layout.addWidget(self.pin_status)
 
-        btn_save = QPushButton("ОБНОВИТЬ PIN-КОД")
+        btn_save = QPushButton("СОХРАНИТЬ НОВЫЙ PIN")
         btn_save.setCursor(Qt.PointingHandCursor)
-        btn_save.setMinimumHeight(45)
+        btn_save.setFixedHeight(45) # ЖЕСТКАЯ ВЫСОТА
         btn_save.setStyleSheet(
-            f"QPushButton {{ background-color: {ACCENT_BLUE}; color: white; font-weight: bold; font-size: 14px; border-radius: 6px; border: none; }}"
+            f"QPushButton {{ background-color: {ACCENT_BLUE}; color: white; font-weight: 800; font-size: 14px; letter-spacing: 1px; border-radius: 8px; border: none; }}"
             f"QPushButton:hover {{ background-color: #2563EB; }}"
+            f"QPushButton:pressed {{ background-color: #1D4ED8; }}"
         )
         btn_save.clicked.connect(self._save_pin)
         pin_layout.addWidget(btn_save)
@@ -535,48 +604,59 @@ class SettingsPage(QWidget):
 
         # ── БЛОК 2: Автозапуск ────────────────────────────────────────
         auto_frame = QFrame()
-        auto_frame.setStyleSheet(f"QFrame {{ background-color: {BG_SURFACE}; border: 1px solid {BORDER_COLOR}; border-radius: 8px; }}")
+        auto_frame.setStyleSheet(f"QFrame#AutoFrame {{ background-color: {BG_SURFACE}; border: 1px solid {BORDER_COLOR}; border-radius: 12px; }}")
+        auto_frame.setObjectName("AutoFrame")
+        
         auto_layout = QVBoxLayout(auto_frame)
-        auto_layout.setContentsMargins(25, 25, 25, 25)
+        auto_layout.setContentsMargins(30, 25, 30, 25)
         auto_layout.setSpacing(15)
 
-        lbl_auto = QLabel("Запуск при старте Windows")
+        lbl_auto = QLabel("🚀 Системные параметры")
         lbl_auto.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 16px; font-weight: bold; border: none; background: transparent;")
         auto_layout.addWidget(lbl_auto)
 
-        self.cb_autostart = QCheckBox(" Запускать SecureCopyGuard при включении ПК")
-        self.cb_autostart.setChecked(autostart_is_enabled())
+        self.cb_autostart = QCheckBox(" Запускать Endpoint Agent при старте Windows")
+        # Убираем проверку autostart_is_enabled(), если она выдает ошибку, либо оставляем как было:
+        try:
+            self.cb_autostart.setChecked(autostart_is_enabled())
+        except:
+            pass
+            
+        self.cb_autostart.setFixedHeight(30)
         self.cb_autostart.setStyleSheet(
             f"QCheckBox {{ font-size: 15px; color: {TEXT_PRIMARY}; border: none; background: transparent; }}"
-            f"QCheckBox::indicator {{ width: 22px; height: 22px; border: 2px solid {BORDER_COLOR}; border-radius: 4px; background: {BG_BASE}; }}"
+            f"QCheckBox::indicator {{ width: 20px; height: 20px; border: 2px solid {BORDER_COLOR}; border-radius: 6px; background: {BG_BASE}; }}"
             f"QCheckBox::indicator:checked {{ background: {ACCENT_BLUE}; border-color: {ACCENT_BLUE}; }}"
         )
         self.cb_autostart.stateChanged.connect(self._toggle_autostart)
         auto_layout.addWidget(self.cb_autostart)
 
         self.autostart_status = QLabel("")
-        self.autostart_status.setStyleSheet("font-size: 13px; color: #94A3B8; border: none; background: transparent;")
+        self.autostart_status.setStyleSheet("font-size: 13px; font-weight: bold; color: #94A3B8; border: none; background: transparent;")
         auto_layout.addWidget(self.autostart_status)
 
         main_layout.addWidget(auto_frame)
 
         # ── БЛОК 3: Инфо ──────────────────────────────────────────────
         info_frame = QFrame()
-        info_frame.setStyleSheet(f"QFrame {{ background-color: {BG_SURFACE}; border: 1px solid {BORDER_COLOR}; border-radius: 8px; }}")
+        info_frame.setStyleSheet(f"QFrame#InfoFrame {{ background-color: {BG_SURFACE}; border: 1px solid {BORDER_COLOR}; border-radius: 12px; }}")
+        info_frame.setObjectName("InfoFrame")
+        
         info_layout = QVBoxLayout(info_frame)
-        info_layout.setContentsMargins(25, 25, 25, 25)
-        info_layout.setSpacing(10)
+        info_layout.setContentsMargins(30, 25, 30, 25)
+        info_layout.setSpacing(8)
 
-        lbl_info = QLabel("Аппаратное ускорение")
+        lbl_info = QLabel("⚙️ Техническая информация")
         lbl_info.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 16px; font-weight: bold; border: none; background: transparent;")
         info_layout.addWidget(lbl_info)
 
         lbl_style = f"font-size: 14px; color: {TEXT_MUTED}; border: none; background: transparent;"
-        i1 = QLabel("• AI Engine: YOLOv8 Nano (yolov8n.pt)")
+        
+        i1 = QLabel("• AI Engine: YOLOv8 Nano (Hardware Accelerated)")
         i1.setStyleSheet(lbl_style)
-        i2 = QLabel("• Storage: dlp_logs.db")
+        i2 = QLabel("• Storage Database: dlp_logs.db (SQLite3)")
         i2.setStyleSheet(lbl_style)
-        i3 = QLabel("• Evidence: _INTRUDERS/ (jpg кадры с камеры)")
+        i3 = QLabel("• Evidence Directory: _INTRUDERS/ (Encrypted cache)")
         i3.setStyleSheet(lbl_style)
 
         info_layout.addWidget(i1)
@@ -584,40 +664,122 @@ class SettingsPage(QWidget):
         info_layout.addWidget(i3)
 
         main_layout.addWidget(info_frame)
+        
+        # ОЧЕНЬ ВАЖНО: Пружина в самом низу, чтобы давить всё наверх!
         main_layout.addStretch()
 
     # ── Функционал кнопок ─────────────────────────────────────────────
     def _save_pin(self):
+        p_old = self.pin_old.text().strip()
         p1 = self.pin_input.text().strip()
         p2 = self.pin_confirm.text().strip()
+
+        current_hash = get_config_value("pin_hash", "")
+        if current_hash:
+            if not p_old:
+                self.pin_status.setText("❌ Введите текущий PIN-код.")
+                self.pin_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #EF4444; border: none; background: transparent;")
+                return
+            if not verify_pin(p_old):
+                self.pin_status.setText("❌ Неверный текущий PIN-код! Доступ запрещен.")
+                self.pin_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #EF4444; border: none; background: transparent;")
+                return
+
         if not p1:
-            self.pin_status.setText("❌ Введите PIN.")
-            self.pin_status.setStyleSheet("font-size: 14px; color: #EF4444; border: none; background: transparent;")
+            self.pin_status.setText("❌ Введите новый PIN-код.")
+            self.pin_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #EF4444; border: none; background: transparent;")
             return
         if len(p1) < 4:
             self.pin_status.setText("❌ PIN должен быть не короче 4 символов.")
-            self.pin_status.setStyleSheet("font-size: 14px; color: #EF4444; border: none; background: transparent;")
+            self.pin_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #EF4444; border: none; background: transparent;")
             return
         if p1 != p2:
-            self.pin_status.setText("❌ PIN-коды не совпадают.")
-            self.pin_status.setStyleSheet("font-size: 14px; color: #EF4444; border: none; background: transparent;")
+            self.pin_status.setText("❌ Новые PIN-коды не совпадают.")
+            self.pin_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #EF4444; border: none; background: transparent;")
             return
+        
         set_config_value("pin_hash", hash_pin(p1))
+        self.pin_old.clear()
         self.pin_input.clear()
         self.pin_confirm.clear()
-        self.pin_status.setText("✅ PIN успешно обновлён.")
-        self.pin_status.setStyleSheet("font-size: 14px; color: #10B981; border: none; background: transparent;")
+        self.pin_status.setText("✅ PIN-код успешно обновлён и защищён.")
+        self.pin_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #10B981; border: none; background: transparent;")
 
     def _toggle_autostart(self, state):
         if state == Qt.Checked:
             ok = enable_autostart()
             set_config_value("autostart", True)
-            msg = "✅ Автозапуск включён." if ok else "❌ Ошибка включения автозапуска."
+            msg = "✅ Автозапуск активирован." if ok else "❌ Ошибка включения автозапуска."
             color = "#10B981" if ok else "#EF4444"
         else:
             ok = disable_autostart()
             set_config_value("autostart", False)
-            msg = "✅ Автозапуск отключён." if ok else "❌ Ошибка отключения автозапуска."
+            msg = "✅ Автозапуск деактивирован." if ok else "❌ Ошибка отключения автозапуска."
             color = "#10B981" if ok else "#EF4444"
         self.autostart_status.setText(msg)
-        self.autostart_status.setStyleSheet(f"font-size: 13px; color: {color}; border: none; background: transparent;")
+        self.autostart_status.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {color}; border: none; background: transparent;")
+
+class PinDialog(QDialog):
+    """Окно проверки Master-PIN для критических действий"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Требуется Master-PIN")
+        self.setFixedSize(320, 200) # Чуть увеличили окно
+        self.setStyleSheet(f"background-color: #0F172A; color: #F8FAFC;")
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        lbl = QLabel("🛡️ Введите Master-PIN:")
+        lbl.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(lbl)
+        
+        self.pin_input = QLineEdit()
+        self.pin_input.setEchoMode(QLineEdit.Password)
+        self.pin_input.setFixedHeight(40) # Жесткая высота
+        self.pin_input.setStyleSheet(
+            f"border: 1px solid #334155; border-radius: 6px; padding: 5px 15px; font-size: 16px; background-color: #1E293B;"
+        )
+        layout.addWidget(self.pin_input)
+        
+        self.error_lbl = QLabel("")
+        self.error_lbl.setStyleSheet("color: #EF4444; font-size: 12px; font-weight: bold;")
+        self.error_lbl.setWordWrap(True)
+        layout.addWidget(self.error_lbl)
+        
+        btn_verify = QPushButton("ПОДТВЕРДИТЬ")
+        btn_verify.setFixedHeight(40)
+        btn_verify.setStyleSheet(
+            f"background-color: #DC2626; color: white; font-weight: bold; border-radius: 6px; border: none;"
+        )
+        btn_verify.clicked.connect(self.check_pin)
+        layout.addWidget(btn_verify)
+
+    def check_pin(self):
+        from config import verify_pin, get_config_value
+        from core.telegram_alerts import send_telegram_alert
+        from core.spy_module import SpyModule
+        
+        stored_hash = get_config_value("pin_hash", "")
+        
+        if not stored_hash:
+            self.error_lbl.setText("❌ ПИН-код не установлен!\nЗадайте его в Настройках.")
+            return
+            
+        input_pin = self.pin_input.text().strip()
+        
+        # Строгая проверка
+        if verify_pin(input_pin):
+            self.accept() # ПИН верный, пускаем!
+        else:
+            self.error_lbl.setText("❌ Неверный PIN-код!")
+            self.pin_input.clear()
+            
+            # ─── ОТПРАВЛЯЕМ АЛЕРТ И ФОТКАЕМ ВЗЛОМЩИКА ───
+            print("[SECURITY] Попытка несанкционированного доступа к настройкам!")
+            photo_path = SpyModule.take_photo()
+            if not photo_path:
+                photo_path = SpyModule.take_screenshot()
+                
+            msg = "🚨 ВНИМАНИЕ: Зафиксирована попытка подбора Master-PIN!\nКто-то пытается отключить защиту SecureCopyGuard."
+            send_telegram_alert(msg, photo_path)

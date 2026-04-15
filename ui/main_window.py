@@ -185,18 +185,29 @@ class MainWindow(QMainWindow):
             self.page_logs.refresh_all()
 
     # ── ПЕРЕХВАТ ЗАКРЫТИЯ ОКНА (КРЕСТИК / ALT+F4) ────────────────────
+    
     def closeEvent(self, event):
-        pin_hash = get_config_value("pin_hash", "")
+        from core.telegram_alerts import send_telegram_alert
+        import os # ДОБАВИТЬ ИМПОРТ
         
-        # Если PIN-кода нет, просто разрешаем закрыть
-        if not pin_hash:
-            event.accept()
-            return
+        # Вычисляем точный путь к папке проекта
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        flag_path = os.path.join(base_dir, "legal_exit.flag")
+        
+        if hasattr(self, 'page_dash') and self.page_dash.is_armed:
+            from ui.pages import PinDialog
+            from PyQt5.QtWidgets import QDialog
             
-        # Если PIN есть, показываем окно блокировки
-        dialog = UnlockDialog(self)
-        if dialog.exec_() == QDialog.Accepted:
-            event.accept()
+            dialog = PinDialog(self)
+            if dialog.exec_() == QDialog.Accepted:
+                # ─── СОЗДАЕМ ФЛАГ ТОЧНО В КОРНЕ ПРОЕКТА ───
+                open(flag_path, "w").close() 
+                
+                send_telegram_alert("⭕ СТАТУС: Агент SecureCopyGuard остановлен легально (Введен Master-PIN).")
+                event.accept() 
+            else:
+                event.ignore()
         else:
-            # ТУТ МЫ ПОТОМ ДОБАВИМ ЛОГИКУ ФОТО-ЛОВУШКИ ПРИ ОТМЕНЕ
-            event.ignore()
+            open(flag_path, "w").close() 
+            send_telegram_alert("⭕ СТАТУС: Программа закрыта (защита была неактивна).")
+            event.accept()

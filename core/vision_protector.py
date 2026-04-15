@@ -8,6 +8,8 @@ from pathlib import Path
 from ultralytics import YOLO 
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from core.spy_module import SpyModule # <--- Подключаем нашего шпиона
+
 
 class VisionProtector(QThread):
     """
@@ -54,10 +56,14 @@ class VisionProtector(QThread):
             self.camera_error.emit(f"Не удалось загрузить модель YOLO: {exc}")
             return
 
+        # ─── БЛОКИРУЕМ КАМЕРУ ДЛЯ ОСТАЛЬНЫХ МОДУЛЕЙ ───
+        SpyModule._camera_busy = True
+
         # ИСПРАВЛЕНИЕ ДЛЯ WINDOWS: Добавлен cv2.CAP_DSHOW
-        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        cap = cv2.VideoCapture(0)
         if not cap.isOpened():
             self.camera_error.emit("Камера недоступна. Проверьте подключение.")
+            SpyModule._camera_busy = False # Снимаем блокировку, если камера не открылась
             return
 
         self._running = True
@@ -76,6 +82,8 @@ class VisionProtector(QThread):
 
         finally:
             cap.release()
+            # ─── ОСВОБОЖДАЕМ КАМЕРУ ───
+            SpyModule._camera_busy = False
             self._running = False
             self.status_changed.emit(False)
             print("[VISION] ИИ-детекция остановлена.")
