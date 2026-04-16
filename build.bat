@@ -11,10 +11,8 @@ echo.
 echo [2/2] Начинаю сборку проекта...
 echo.
 
-:: УБРАЛИ --icon="icon.ico", чтобы не было из-за нее ошибок
 pyinstaller --noconfirm --windowed --add-data "yolov8n.pt;." --name "SecureCopyGuard" main.py
 
-:: ─── УМНАЯ ПРОВЕРКА ОШИБОК ───
 if %ERRORLEVEL% NEQ 0 (
     echo.
     echo =======================================================
@@ -23,6 +21,12 @@ if %ERRORLEVEL% NEQ 0 (
     pause
     exit /b
 )
+
+:: ─── ФИКС: КОПИРУЕМ КОНФИГ И БАЗУ В ПАПКУ СО СБОРКОЙ ───
+echo.
+echo [3/3] Копирование конфигурации и базы данных...
+if exist "config.json" copy "config.json" "dist\SecureCopyGuard\" >nul
+if exist "dlp_logs.db" copy "dlp_logs.db" "dist\SecureCopyGuard\" >nul
 
 echo.
 echo =======================================================

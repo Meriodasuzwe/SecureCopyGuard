@@ -184,30 +184,30 @@ class MainWindow(QMainWindow):
         if index == 2:
             self.page_logs.refresh_all()
 
+    
     # ── ПЕРЕХВАТ ЗАКРЫТИЯ ОКНА (КРЕСТИК / ALT+F4) ────────────────────
     
     def closeEvent(self, event):
         from core.telegram_alerts import send_telegram_alert
-        import os # ДОБАВИТЬ ИМПОРТ
+        import os
+        import tempfile 
+        from ui.pages import PinDialog
+        from PyQt5.QtWidgets import QDialog
         
-        # Вычисляем точный путь к папке проекта
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        flag_path = os.path.join(base_dir, "legal_exit.flag")
+        # Вычисляем уникальный PID текущего процесса
+        current_pid = os.getpid()
+        flag_path = os.path.join(tempfile.gettempdir(), f"dlp_legal_exit_{current_pid}.flag")
         
-        if hasattr(self, 'page_dash') and self.page_dash.is_armed:
-            from ui.pages import PinDialog
-            from PyQt5.QtWidgets import QDialog
+        # ─── ФИКС: ПИН-КОД ТЕПЕРЬ ТРЕБУЕТСЯ ВСЕГДА (ДАЖЕ НА ХОЛОДНОМ СТАРТЕ) ───
+        dialog = PinDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            # Юзер ввел правильный ПИН-код
+            open(flag_path, "w").close() # Выдаем легальный пропуск Сторожу
             
-            dialog = PinDialog(self)
-            if dialog.exec_() == QDialog.Accepted:
-                # ─── СОЗДАЕМ ФЛАГ ТОЧНО В КОРНЕ ПРОЕКТА ───
-                open(flag_path, "w").close() 
-                
-                send_telegram_alert("⭕ СТАТУС: Агент SecureCopyGuard остановлен легально (Введен Master-PIN).")
-                event.accept() 
-            else:
-                event.ignore()
+            status_text = "⭕ СТАТУС: Агент SecureCopyGuard остановлен легально (Введен Master-PIN)."
+            send_telegram_alert(status_text)
+            event.accept() # Разрешаем закрыть окно
         else:
-            open(flag_path, "w").close() 
-            send_telegram_alert("⭕ СТАТУС: Программа закрыта (защита была неактивна).")
-            event.accept()
+            # Юзер нажал отмену или ввел неверный ПИН
+            # Окно дернется, но не закроется!
+            event.ignore()

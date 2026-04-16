@@ -9,24 +9,50 @@ import tempfile
 import traceback
 import ctypes
 
-# ─── УМНОЕ ВЫЧИСЛЕНИЕ ПУТИ (СПАСАЕТ ПРИ СБОРКЕ В EXE) ───
+# ── 0. ПУЛЕНЕПРОБИВАЕМЫЙ ЧЕРНЫЙ ЯЩИК ──
+crash_log_path = os.path.join(tempfile.gettempdir(), "DLP_CRASH_LOG.txt")
+try:
+    log_file = open(crash_log_path, "a", encoding="utf-8")
+    sys.stdout = log_file
+    sys.stderr = log_file
+except Exception:
+    pass
+
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    try:
+        with open(crash_log_path, "a", encoding="utf-8") as f:
+            f.write("\n" + "!"*50 + "\n")
+            f.write(f"[{time.strftime('%X')}] 🔥 КРИТИЧЕСКАЯ ОШИБКА:\n")
+            traceback.print_exception(exc_type, exc_value, exc_traceback, file=f)
+            f.write("!"*50 + "\n")
+    except Exception:
+        pass
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+sys.excepthook = global_exception_handler
+
+# ─── 100% НАДЕЖНЫЕ ПУТИ ───
+WATCHDOG_LOG = os.path.join(tempfile.gettempdir(), "dlp_watchdog.log")
+
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-FLAG_FILE = os.path.join(BASE_DIR, "legal_exit.flag")
-WATCHDOG_LOG = os.path.join(BASE_DIR, "watchdog_debug.log")
-
 # ─── ЛОВУШКА СТОРОЖА (В САМОМ ВЕРХУ!) ───
 if "--watchdog" in sys.argv:
     target_pid = int(sys.argv[sys.argv.index("--watchdog") + 1])
-    
-    sys.path.insert(0, BASE_DIR)
-    from core.telegram_alerts import send_telegram_alert
+    original_dir = sys.argv[sys.argv.index("--watchdog") + 2] 
+
+    # ─── УНИКАЛЬНЫЙ ИМЕННОЙ ФЛАГ С PID ПРОГРАММЫ ───
+    FLAG_FILE = os.path.join(tempfile.gettempdir(), f"dlp_legal_exit_{target_pid}.flag")
+
+    import json
+    import urllib.request
+    import urllib.parse
 
     with open(WATCHDOG_LOG, "w", encoding="utf-8") as f:
-        f.write(f"[{time.strftime('%X')}] СТОРОЖ ЗАПУЩЕН (ПРИЗРАК). Слежу за PID: {target_pid}\n")
+        f.write(f"[{time.strftime('%X')}] СТОРОЖ ЗАПУЩЕН. PID: {target_pid}, Оригинал: {original_dir}\n")
 
     kernel32 = ctypes.windll.kernel32
     time.sleep(3) 
@@ -42,7 +68,7 @@ if "--watchdog" in sys.argv:
                 exit_code = ctypes.c_ulong()
                 kernel32.GetExitCodeProcess(h_process, ctypes.byref(exit_code))
                 kernel32.CloseHandle(h_process)
-                alive = (exit_code.value == 259) # 259 = STILL_ACTIVE
+                alive = (exit_code.value == 259)
 
             if not alive:
                 with open(WATCHDOG_LOG, "a", encoding="utf-8") as f:
@@ -51,11 +77,54 @@ if "--watchdog" in sys.argv:
                 if os.path.exists(FLAG_FILE):
                     os.remove(FLAG_FILE)
                     with open(WATCHDOG_LOG, "a", encoding="utf-8") as f:
-                        f.write(f"[{time.strftime('%X')}] Найден флаг легального выхода. Сплю.\n")
+                        f.write(f"[{time.strftime('%X')}] Флаг легального выхода найден. Сплю.\n")
                 else:
                     with open(WATCHDOG_LOG, "a", encoding="utf-8") as f:
                         f.write(f"[{time.strftime('%X')}] Флага НЕТ. Шлю Telegram алерт!\n")
-                    send_telegram_alert("🔴 КРИТИЧЕСКАЯ УГРОЗА: Процесс SecureCopyGuard был принудительно УБИТ через Диспетчер задач!")
+                        
+                    # ─── ПРЯМАЯ ОТПРАВКА БЕЗ СТОРОННИХ МОДУЛЕЙ ───
+                    try:
+                        config_path = os.path.join(original_dir, "config.json")
+                        with open(config_path, "r", encoding="utf-8") as f_cfg:
+                            cfg = json.load(f_cfg)
+                        
+                        token = cfg.get("telegram_token", "")
+                        chat_id = cfg.get("telegram_chat_id", "")
+                        
+                        if token and chat_id:
+                            url = f"https://api.telegram.org/bot{token}/sendMessage"
+                            msg_data = urllib.parse.urlencode({
+                                'chat_id': chat_id, 
+                                'text': "🔴 КРИТИЧЕСКАЯ УГРОЗА: Агент SecureCopyGuard был принудительно УБИТ через Диспетчер задач! Процесс авто-восстановления запущен."
+                            }).encode('utf-8')
+                            
+                            req = urllib.request.Request(url, data=msg_data)
+                            urllib.request.urlopen(req, timeout=5)
+                            
+                            with open(WATCHDOG_LOG, "a", encoding="utf-8") as f:
+                                f.write(f"[{time.strftime('%X')}] Алерт успешно доставлен в Telegram!\n")
+                        else:
+                            with open(WATCHDOG_LOG, "a", encoding="utf-8") as f:
+                                f.write(f"[{time.strftime('%X')}] ОШИБКА: Нет токена в config.json\n")
+                    except Exception as req_e:
+                        with open(WATCHDOG_LOG, "a", encoding="utf-8") as f:
+                            f.write(f"[{time.strftime('%X')}] Ошибка API Telegram: {req_e}\n")
+                    
+                    # ─── 🦅 АКТИВНАЯ ЗАЩИТА: РЕЖИМ ФЕНИКСА ───
+                    try:
+                        exe_path = os.path.join(original_dir, "SecureCopyGuard.exe")
+                        if os.path.exists(exe_path):
+                            subprocess.Popen([exe_path], cwd=original_dir)
+                        else:
+                            # Фолбэк на случай теста прямо из редактора кода
+                            subprocess.Popen([sys.executable, os.path.join(original_dir, "main.py")], cwd=original_dir)
+                            
+                        with open(WATCHDOG_LOG, "a", encoding="utf-8") as f:
+                            f.write(f"[{time.strftime('%X')}] 🦅 ФЕНИКС: Программа успешно перезапущена!\n")
+                    except Exception as revive_e:
+                        with open(WATCHDOG_LOG, "a", encoding="utf-8") as f:
+                            f.write(f"[{time.strftime('%X')}] Ошибка возрождения: {revive_e}\n")
+                    # ────────────────────────────────────────────────
                 break
 
         except Exception as e:
@@ -66,30 +135,6 @@ if "--watchdog" in sys.argv:
         
     sys.exit(0)
 # ─────────────────────────────────────────────────────────────
-
-# ── 0. ПУЛЕНЕПРОБИВАЕМЫЙ ЧЕРНЫЙ ЯЩИК ──────────────────────────────
-crash_log_path = os.path.join(tempfile.gettempdir(), "DLP_CRASH_LOG.txt")
-
-try:
-    log_file = open(crash_log_path, "w", encoding="utf-8")
-    sys.stdout = log_file
-    sys.stderr = log_file
-except Exception:
-    pass
-
-def global_exception_handler(exc_type, exc_value, exc_traceback):
-    try:
-        with open(crash_log_path, "a", encoding="utf-8") as f:
-            f.write("\n" + "!"*50 + "\n")
-            f.write("🔥 ПРИЛОЖЕНИЕ УПАЛО С ОШИБКОЙ:\n")
-            traceback.print_exception(exc_type, exc_value, exc_traceback, file=f)
-            f.write("!"*50 + "\n")
-    except Exception:
-        pass
-    sys.__excepthook__(exc_type, exc_value, exc_traceback)
-
-sys.excepthook = global_exception_handler
-# ───────────────────────────────────────────────────────────────
 
 import torch
 import cv2
@@ -102,32 +147,32 @@ from core.single_instance import ensure_single_instance, release_mutex
 from core.first_run        import check_and_run_wizard
 from config                import get_telegram_token, get_telegram_chat_id, get_config_value
 
-
 def main():
+    # Очищаем уникальный флаг, если он вдруг застрял
+    current_pid = os.getpid()
+    FLAG_FILE = os.path.join(tempfile.gettempdir(), f"dlp_legal_exit_{current_pid}.flag")
+    
     if os.path.exists(FLAG_FILE):
         try: os.remove(FLAG_FILE)
         except: pass
         
-    # ─── ФИКС: КЛОНИРУЕМ В ТУ ЖЕ ПАПКУ И ДЕЛАЕМ НЕВИДИМЫМ ───
     ghost_name = "win_system_host.exe" 
     ghost_path = os.path.join(BASE_DIR, ghost_name)
     
     try:
         if not os.path.exists(ghost_path):
             shutil.copy2(sys.executable, ghost_path)
-            # Магия Windows: делаем файл скрытым (атрибут 2)
             if sys.platform == "win32":
                 ctypes.windll.kernel32.SetFileAttributesW(ghost_path, 2)
     except Exception:
         ghost_path = sys.executable 
 
-    CREATE_FLAGS = 0x01000208 
+    CREATE_FLAGS = 0x09000208 
     
     if getattr(sys, 'frozen', False):
-        subprocess.Popen([ghost_path, "--watchdog", str(os.getpid())], creationflags=CREATE_FLAGS, cwd=BASE_DIR)
+        subprocess.Popen([ghost_path, "--watchdog", str(os.getpid()), BASE_DIR], creationflags=CREATE_FLAGS, cwd=BASE_DIR)
     else:
-        subprocess.Popen([ghost_path, os.path.abspath(__file__), "--watchdog", str(os.getpid())], creationflags=CREATE_FLAGS, cwd=BASE_DIR)
-    # ────────────────────────────────────────────────────────
+        subprocess.Popen([ghost_path, os.path.abspath(__file__), "--watchdog", str(os.getpid()), BASE_DIR], creationflags=CREATE_FLAGS, cwd=BASE_DIR)
 
     print("[DEBUG] Старт функции main()")
     
@@ -172,7 +217,6 @@ def main():
     ret = app.exec_()
     release_mutex()
     sys.exit(ret)
-
 
 if __name__ == "__main__":
     try:
