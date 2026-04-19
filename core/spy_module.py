@@ -1,41 +1,51 @@
 # core/spy_module.py
 
+import os
 import time
 import threading
-import winsound
-import cv2
 from pathlib import Path
-from config import INTRUDER_FOLDER
+import cv2
+from PIL import ImageGrab
 
+# Пытаемся импортировать путь из конфига, если нет - используем дефолтный
+try:
+    from config import INTRUDER_FOLDER
+except ImportError:
+    INTRUDER_FOLDER = "_INTRUDERS"
 
 class SpyModule:
     """
-    Утилитный класс для:
-      - звукового оповещения (siren)
-      - снимка с веб-камеры (take_photo)
-      - снимка экрана (take_screenshot)
+    Enterprise-утилита для аппаратного контроля:
+      - Фото-фиксация (с защитой от зависания DirectShow)
+      - Снимки экрана (потокобезопасные через PIL)
+      - Звуковые сирены (асинхронные)
     """
 
-    # Флаг занятости камеры (управляется из VisionProtector)
+    # Флаг занятости камеры (управляется из VisionProtector для предотвращения конфликта потоков)
     _camera_busy = False
 
     @staticmethod
     def take_photo(camera_index: int = 0) -> str | None:
-        # СПАСАЕТ ОТ ЗАВИСАНИЯ! Если YOLO работает, даже не трогаем вебку.
+        """Делает снимок с веб-камеры. Если камера занята AI, делает пропуск."""
+        
         if SpyModule._camera_busy:
             print("[SPY] Камера занята AI Vision. Пропускаем фото, делаем скриншот.")
             return None
 
         cam = None
         try:
-            # ВАЖНО ДЛЯ WINDOWS: Добавлен cv2.CAP_DSHOW чтобы камера не висла в .exe
-            cam = cv2.VideoCapture(camera_index)
+            # Сначала пробуем DirectShow (быстрый запуск для Windows .exe)
+            cam = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
             
+            # Если не получилось, пробуем стандартный бэкенд (для старых камер/ноутбуков)
             if not cam.isOpened():
-                print("[SPY] Камера недоступна.")
+                cam = cv2.VideoCapture(camera_index)
+            
+            # Если всё еще глухо - сдаемся
+            if not cam.isOpened():
+                print("[SPY] Камера недоступна аппаратно.")
                 return None
 
-            # Прогреваем — первые кадры всегда тёмные
             for _ in range(5):
                 cam.read()
 
@@ -48,11 +58,11 @@ class SpyModule:
             filepath = Path(INTRUDER_FOLDER) / filename
             cv2.imwrite(str(filepath), frame)
             
-            print(f"[SPY] Снимок сохранён: {filepath}")
+            print(f"[SPY] Снимок нарушителя сохранён: {filepath}")
             return str(filepath)
 
         except Exception as exc:
-            print(f"[SPY] Ошибка при съёмке: {exc}")
+            print(f"[SPY] Критическая ошибка при съёмке: {exc}")
             return None
 
         finally:
@@ -60,40 +70,40 @@ class SpyModule:
                 cam.release()
 
     @staticmethod
-    def play_siren():
-        def _beep():
-            try:
-                for _ in range(3):
-                    winsound.Beep(1200, 250)   # высокий
-                    winsound.Beep(600,  250)   # низкий
-            except Exception as exc:
-                print(f"[SPY] Ошибка сирены: {exc}")
-
-        threading.Thread(target=_beep, daemon=True, name="Siren").start()
-    
-    @staticmethod
     def take_screenshot() -> str | None:
         """
-        Делает скриншот всего рабочего стола в момент инцидента.
-        Идеальное доказательство для кражи файлов или буфера обмена.
+        Делает скриншот всего рабочего стола.
+        Использует PIL (ImageGrab) для 100% потокобезопасности при вызове из фоновых воркеров DLP.
         """
-        from PyQt5.QtWidgets import QApplication
-        from pathlib import Path
-        import time
-
         try:
             folder = Path(INTRUDER_FOLDER)
             folder.mkdir(exist_ok=True, parents=True)
+            
             filepath = folder / f"screenshot_{int(time.time())}.jpg"
             
-            # Захватываем главный экран системы
-            screen = QApplication.primaryScreen()
-            if screen is not None:
-                pixmap = screen.grabWindow(0)
-                pixmap.save(str(filepath), "JPG", 75) # 75 - сжатие для быстрого Telegram
-                print(f"[SPY] Скриншот доказательства сохранен: {filepath}")
-                return str(filepath)
-            return None
+            # Захватываем экран и сохраняем с оптимизацией для быстрой отправки в Telegram
+            screenshot = ImageGrab.grab()
+            screenshot.save(str(filepath), "JPEG", quality=75)
+            
+            print(f"[SPY] Скриншот доказательства сохранен: {filepath}")
+            return str(filepath)
+            
         except Exception as exc:
             print(f"[SPY] Ошибка при создании скриншота: {exc}")
             return None
+
+    @staticmethod
+    def play_siren():
+        """Асинхронный запуск звуковой тревоги (не блокирует основной поток программы)"""
+        def _beep():
+            try:
+                import winsound
+                # Имитация полицейской сирены (3 цикла)
+                for _ in range(3):
+                    winsound.Beep(1200, 250)   # высокий тон
+                    winsound.Beep(600,  250)   # низкий тон
+            except Exception as exc:
+                print(f"[SPY] Ошибка аппаратной сирены: {exc}")
+
+        # Запускаем как daemon-поток (умрет вместе с программой, если что)
+        threading.Thread(target=_beep, daemon=True, name="SirenThread").start()

@@ -197,6 +197,9 @@ def main():
     saved_folder = get_config_value("protected_folder", "")
     if saved_folder:
         window.page_dash.restore_folder(saved_folder)
+    
+    window.page_dash.btn_arm.setChecked(True)
+    window.page_dash.toggle_protection()
 
     window.show()
 
