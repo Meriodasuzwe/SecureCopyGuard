@@ -5,11 +5,10 @@ import os
 import ctypes
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, pyqtSignal, QMetaObject, Qt
 
-from config import get_telegram_token, get_telegram_chat_id
+from config import get_telegram_token, get_telegram_chat_id, set_config_value
 from db.database import Database
-
 
 class TelegramAdminBot(QThread):
     arm_signal    = pyqtSignal()
@@ -17,168 +16,111 @@ class TelegramAdminBot(QThread):
 
     def __init__(self):
         super().__init__()
-        # Берем данные через функции, чтобы они 100% обновились после Wizard'а
         self.token      = get_telegram_token()
         self.chat_id    = int(get_telegram_chat_id())
-        
-        # threaded=False - ОЧЕНЬ ВАЖНО для PyQt. Иначе telebot плодит свои потоки и конфликтует с UI
         self.bot        = telebot.TeleBot(self.token, threaded=False)
         self.is_running = True
         self._db        = Database()
-
-        # Ссылка на DashboardPage — устанавливается из main.py
         self._dashboard = None
 
     def set_dashboard(self, dashboard):
         """Вызвать из main.py: admin_bot.set_dashboard(window.page_dash)"""
         self._dashboard = dashboard
 
-    # ──────────────────────────────────────────────────────────────────
-
     def run(self):
         def _kb():
             kb = ReplyKeyboardMarkup(resize_keyboard=True)
             kb.add(KeyboardButton("🟢 АКТИВИРОВАТЬ"), KeyboardButton("🔴 ВЫКЛЮЧИТЬ"))
             kb.add(KeyboardButton("📊 СТАТУС"),        KeyboardButton("📋 ОТЧЁТ"))
-            # ── ДОБАВЛЕНЫ КНОПКИ СМЕРТИ ──
-            kb.add(KeyboardButton("💻 БЛОК ПК"),      KeyboardButton("🔌 ВЫРУБИТЬ ПК"))
+            # 🔥 НОВЫЕ КНОПКИ: Мягкий и Жесткий лок
+            kb.add(KeyboardButton("💻 СОФТ-ЛОК (Win)"), KeyboardButton("🧱 ХАРД-ЛОК (DLP)"))
+            kb.add(KeyboardButton("🔌 ВЫРУБИТЬ ПК"))
             return kb
 
-        # ── /start ────────────────────────────────────────────────────
         @self.bot.message_handler(commands=["start"])
         def cmd_start(m):
-            if m.chat.id != self.chat_id:
-                return
-            self.bot.send_message(
-                m.chat.id,
-                "🛡️ *SecureCopyGuard DLP* на связи.\nВыберите действие:",
-                reply_markup=_kb(),
-                parse_mode="Markdown"
-            )
+            if m.chat.id != self.chat_id: return
+            self.bot.send_message(m.chat.id, "🛡️ *SecureCopyGuard DLP* на связи.\nВыберите действие:", reply_markup=_kb(), parse_mode="Markdown")
 
-        # ── Активировать ──────────────────────────────────────────────
         @self.bot.message_handler(func=lambda m: m.text == "🟢 АКТИВИРОВАТЬ")
         def cmd_arm(m):
-            if m.chat.id != self.chat_id:
-                return
-            print("[BOT] Получена команда: Активировать")
+            if m.chat.id != self.chat_id: return
             self.arm_signal.emit()
             self.bot.reply_to(m, "✅ Команда отправлена — защита *включается*.", parse_mode="Markdown")
 
-        # ── Выключить ─────────────────────────────────────────────────
         @self.bot.message_handler(func=lambda m: m.text == "🔴 ВЫКЛЮЧИТЬ")
         def cmd_disarm(m):
-            if m.chat.id != self.chat_id:
-                return
-            print("[BOT] Получена команда: Выключить")
+            if m.chat.id != self.chat_id: return
             self.disarm_signal.emit()
             self.bot.reply_to(m, "⚠️ Команда отправлена — защита *отключается*.", parse_mode="Markdown")
 
-        # ── Статус — реальные данные из БД ────────────────────────────
         @self.bot.message_handler(func=lambda m: m.text == "📊 СТАТУС")
         def cmd_status(m):
-            if m.chat.id != self.chat_id:
-                return
-
-            armed = (
-                self._dashboard.is_armed
-                if self._dashboard is not None
-                else None
-            )
-            status_str = (
-                "🟢 АКТИВНА"  if armed is True  else
-                "🔴 ВЫКЛЮЧЕНА" if armed is False else
-                "❓ Неизвестно"
-            )
-
-            total      = self._db.get_incident_count()
-            stats      = self._db.get_stats_by_module()
-            stats_text = "\n".join(
-                f"  • {row[0]}: *{row[2]}* ({row[1]})"
-                for row in stats
-            ) or "  нет данных"
-
-            folder = (
-                self._dashboard.target_folder
-                if self._dashboard and self._dashboard.target_folder
-                else "не задана"
-            )
+            if m.chat.id != self.chat_id: return
+            armed = self._dashboard.is_armed if self._dashboard is not None else None
+            status_str = "🟢 АКТИВНА" if armed is True else "🔴 ВЫКЛЮЧЕНА" if armed is False else "❓ Неизвестно"
+            total = self._db.get_incident_count()
+            stats = self._db.get_stats_by_module()
+            stats_text = "\n".join(f"  • {row[0]}: *{row[2]}* ({row[1]})" for row in stats) or "  нет данных"
+            folder = self._dashboard.target_folder if self._dashboard and self._dashboard.target_folder else "не задана"
 
             text = (
-                f"🛡️ *SecureCopyGuard — Статус системы*\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"Состояние защиты: {status_str}\n"
-                f"Целевая директория: `{folder}`\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"Инцидентов (High): *{total}*\n\n"
-                f"По модулям:\n{stats_text}\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"🕐 {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                f"🛡️ *SecureCopyGuard — Статус*\n━━━━━━━━━━━━━━━━━━\nСостояние: {status_str}\n"
+                f"Директория: `{folder}`\n━━━━━━━━━━━━━━━━━━\nИнцидентов (High): *{total}*\n\n"
+                f"Модули:\n{stats_text}\n━━━━━━━━━━━━━━━━━━\n🕐 {time.strftime('%Y-%m-%d %H:%M:%S')}"
             )
             self.bot.reply_to(m, text, parse_mode="Markdown")
 
-        # ── Отчёт ─────────────────────────────────────────────────────
         @self.bot.message_handler(func=lambda m: m.text == "📋 ОТЧЁТ")
         def cmd_report(m):
-            if m.chat.id != self.chat_id:
-                return
+            if m.chat.id != self.chat_id: return
             try:
                 from ui.pdf_report import generate_report
                 path = generate_report()
                 if path:
                     with open(path, "rb") as f:
-                        self.bot.send_document(
-                            m.chat.id, f,
-                            caption="📄 Отчёт об инцидентах сформирован."
-                        )
+                        self.bot.send_document(m.chat.id, f, caption="📄 Отчёт об инцидентах сформирован.")
                 else:
-                    self.bot.reply_to(m, "❌ Не удалось создать отчёт. Проверьте fpdf2.")
+                    self.bot.reply_to(m, "❌ Не удалось создать отчёт.")
             except Exception as exc:
                 self.bot.reply_to(m, f"❌ Ошибка: {exc}")
 
-        # ── Блокировка экрана (Lock Windows) ──────────────────────────
-        @self.bot.message_handler(func=lambda m: m.text == "💻 БЛОК ПК")
+        # ── СОФТ-ЛОК (Обычный Win+L) ──
+        @self.bot.message_handler(func=lambda m: m.text == "💻 СОФТ-ЛОК (Win)")
         def cmd_lock_pc(m):
-            if m.chat.id != self.chat_id:
-                return
-            
-            # Вызываем системную функцию Windows для немедленной блокировки сеанса (Win + L)
+            if m.chat.id != self.chat_id: return
             ctypes.windll.user32.LockWorkStation()
-            
-            self.bot.reply_to(m, "🔒 *Компьютер немедленно заблокирован!*\nПользователь выкинут на экран ввода пароля Windows.", parse_mode="Markdown")
-            print("[BOT] Выполнена команда: Блокировка ПК")
+            self.bot.reply_to(m, "🔒 *Базовая блокировка выполнена!*\nПользователь выкинут на экран ввода пароля Windows.", parse_mode="Markdown")
 
-        # ── Экстренное выключение (Shutdown) ──────────────────────────
+        # 🔥 АГРЕССИВНЫЙ ХАРД-ЛОК (Наш черный экран) ──
+        @self.bot.message_handler(func=lambda m: m.text == "🧱 ХАРД-ЛОК (DLP)")
+        def cmd_hard_lock(m):
+            if m.chat.id != self.chat_id: return
+            set_config_value("hard_lock", True)
+            
+            # Безопасно вызываем метод UI из фонового потока
+            if self._dashboard:
+                QMetaObject.invokeMethod(self._dashboard, "trigger_hard_lock", Qt.QueuedConnection)
+                
+            self.bot.reply_to(m, " *АГРЕССИВНАЯ БЛОКИРОВКА АКТИВИРОВАНА!*\nПК заблокирован глухим экраном. Снять можно только через Master-PIN в программе.", parse_mode="Markdown")
+
         @self.bot.message_handler(func=lambda m: m.text == "🔌 ВЫРУБИТЬ ПК")
         def cmd_shutdown_pc(m):
-            if m.chat.id != self.chat_id:
-                return
-            
-            # /s - выключение, /t 10 - через 10 секунд, /c - комментарий на весь экран
+            if m.chat.id != self.chat_id: return
             os.system('shutdown /s /t 10 /c "SECURE COPY GUARD: КРИТИЧЕСКАЯ УГРОЗА УТЕЧКИ. КОМПЬЮТЕР БУДЕТ ВЫКЛЮЧЕН."')
-            
-            self.bot.reply_to(m, "☠️ *Отправлена команда на экстренное ВЫКЛЮЧЕНИЕ!*\nУ нарушителя есть 10 секунд до отключения питания.", parse_mode="Markdown")
-            print("[BOT] Выполнена команда: Выключение ПК")
+            self.bot.reply_to(m, "☠️ *Отправлена команда на экстренное ВЫКЛЮЧЕНИЕ!*\nУ нарушителя есть 10 секунд.", parse_mode="Markdown")
 
-        # ── Приветствие при запуске программы ─────────────────────────
         try:
-            # Сразу присылаем клавиатуру, чтобы было удобно тыкать кнопки
-            self.bot.send_message(
-                self.chat_id, 
-                "✅ SecureCopyGuard успешно запущен и подключён к сети!", 
-                reply_markup=_kb()
-            )
-        except Exception as e:
-            print(f"[BOT] Ошибка стартового сообщения: {e}")
+            self.bot.send_message(self.chat_id, "✅ SecureCopyGuard успешно запущен и подключён к сети!", reply_markup=_kb())
+        except Exception:
+            pass
 
-        # ── Polling loop (БЕССМЕРТНЫЙ ЦИКЛ) ───────────────────────────
         while self.is_running:
             try:
-                # none_stop=True — запрещаем боту сдаваться при мелких ошибках сети!
                 self.bot.polling(none_stop=True, interval=0, timeout=20)
             except Exception as exc:
                 print(f"[BOT ERROR] {exc}")
-                time.sleep(3)   # пауза 3 секунды перед жестким переподключением
+                time.sleep(3)
 
     def stop(self):
         self.is_running = False
