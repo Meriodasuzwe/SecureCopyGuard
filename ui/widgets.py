@@ -2,7 +2,7 @@
 
 from PyQt5.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QWidget
 from PyQt5.QtGui import QPainter, QPainterPath, QPen, QColor
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QPropertyAnimation, pyqtProperty, QEasingCurve, QRectF
 from ui.theme import *
 
 class VectorIcon(QWidget):
@@ -15,9 +15,8 @@ class VectorIcon(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing) # Включаем сглаживание
+        painter.setRenderHint(QPainter.Antialiasing)
 
-        # Настраиваем "перо" (линию)
         pen = QPen(self.color)
         pen.setWidth(2)
         pen.setCapStyle(Qt.RoundCap)
@@ -27,7 +26,6 @@ class VectorIcon(QWidget):
         path = QPainterPath()
 
         if self.icon_type == "folder":
-            # Рисуем контур папки
             path.moveTo(3, 20)
             path.lineTo(3, 6)
             path.lineTo(9, 6)
@@ -38,11 +36,9 @@ class VectorIcon(QWidget):
             painter.drawPath(path)
 
         elif self.icon_type == "shield":
-            # Рисуем строгий щит безопасности
             path.moveTo(12, 3)
             path.lineTo(21, 7)
             path.lineTo(21, 13)
-            # Используем кривые Безье для закругления низа щита
             path.quadTo(21, 20, 12, 22)
             path.quadTo(3, 20, 3, 13)
             path.lineTo(3, 7)
@@ -50,13 +46,35 @@ class VectorIcon(QWidget):
             painter.drawPath(path)
 
         elif self.icon_type == "pulse":
-            # Рисуем пульс (активность ядра)
             path.moveTo(2, 12)
             path.lineTo(7, 12)
             path.lineTo(10, 4)
             path.lineTo(14, 20)
             path.lineTo(17, 12)
             path.lineTo(22, 12)
+            painter.drawPath(path)
+        
+        elif self.icon_type == "paper_plane":
+            # Рисуем самолетик Telegram
+            path.moveTo(2, 12)
+            path.lineTo(22, 2)
+            path.lineTo(15, 22)
+            path.lineTo(11, 14)
+            path.lineTo(2, 12)
+            path.moveTo(11, 14)
+            path.lineTo(22, 2)
+            painter.drawPath(path)
+            
+        elif self.icon_type == "gear":
+            # Рисуем ползунки настроек (выглядит круче, чем просто шестеренка)
+            path.moveTo(4, 8)
+            path.lineTo(20, 8)
+            path.moveTo(14, 4)
+            path.lineTo(14, 12)
+            path.moveTo(4, 16)
+            path.lineTo(20, 16)
+            path.moveTo(10, 12)
+            path.lineTo(10, 20)
             painter.drawPath(path)
 
 
@@ -91,11 +109,9 @@ class MetricCard(QFrame):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
 
-        # ─── ШАПКА КАРТОЧКИ (Иконка + Текст) ───
         header_layout = QHBoxLayout()
         header_layout.setSpacing(12)
 
-        # Контейнер для эффекта "стекла" вокруг иконки
         icon_container = QWidget()
         icon_container.setFixedSize(38, 38)
         icon_container.setStyleSheet(f"background-color: {glass_bg}; border-radius: 10px;")
@@ -104,7 +120,6 @@ class MetricCard(QFrame):
         icon_layout.setContentsMargins(0, 0, 0, 0)
         icon_layout.setAlignment(Qt.AlignCenter)
         
-        # 🔥 Вставляем нашу кастомную векторную иконку
         vector_icon = VectorIcon(icon_type, color)
         icon_layout.addWidget(vector_icon)
 
@@ -125,7 +140,6 @@ class MetricCard(QFrame):
         layout.addLayout(header_layout)
         layout.addSpacing(4)
 
-        # ─── ЗНАЧЕНИЕ ───
         self.lbl_value = QLabel(value)
         self.lbl_value.setStyleSheet(f"""
             color: {color}; 
@@ -141,8 +155,64 @@ class MetricCard(QFrame):
         layout.addStretch()
 
 
+class AnimatedToggle(QCheckBox):
+    """Кастомный плавный переключатель в стиле iOS / Android"""
+    def __init__(self, default_state=False, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(50, 26) 
+        self.setCursor(Qt.PointingHandCursor)
+        
+        self._position = 27 if default_state else 3
+        self.setChecked(default_state)
+
+        self.animation = QPropertyAnimation(self, b"position")
+        self.animation.setEasingCurve(QEasingCurve.InOutQuad)
+        self.animation.setDuration(250) 
+        
+        self.stateChanged.connect(self.setup_animation)
+
+    # 🔥 ИСПРАВЛЕНИЕ КЛИКА: Указываем PyQt, что вся площадь виджета реагирует на мышку
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
+
+    @pyqtProperty(float)
+    def position(self):
+        return self._position
+
+    @position.setter
+    def position(self, pos):
+        self._position = pos
+        self.update() 
+
+    def setup_animation(self, value):
+        self.animation.stop()
+        if value:
+            self.animation.setEndValue(27) 
+        else:
+            self.animation.setEndValue(3)  
+        self.animation.start()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0, 0, self.width(), self.height()), 13, 13)
+        
+        if self.isChecked():
+            painter.setBrush(QColor(ACCENT_BLUE)) 
+        else:
+            painter.setBrush(QColor("#334155"))   
+            
+        painter.setPen(Qt.NoPen)
+        painter.drawPath(path)
+        
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawEllipse(QRectF(self._position, 3, 20, 20))
+
+
 class PolicyCard(QFrame):
-    """Карточка для включения/отключения модулей защиты"""
+    """Карточка политики с плавающим тумблером"""
     def __init__(self, title, description, default_state=True):
         super().__init__()
         self.setStyleSheet(f"""
@@ -153,6 +223,7 @@ class PolicyCard(QFrame):
             }}
             PolicyCard:hover {{
                 border: 1px solid #475569;
+                background-color: #233147;
             }}
         """)
         
@@ -161,35 +232,20 @@ class PolicyCard(QFrame):
         
         text_layout = QVBoxLayout()
         self.lbl_title = QLabel(title)
-        self.lbl_title.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 14px; font-weight: bold; border: none;")
+        self.lbl_title.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 14px; font-weight: 900; border: none; background: transparent;")
         
         self.lbl_desc = QLabel(description)
-        self.lbl_desc.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; border: none;")
+        self.lbl_desc.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px; border: none; background: transparent;")
         self.lbl_desc.setWordWrap(True)
         
         text_layout.addWidget(self.lbl_title)
         text_layout.addWidget(self.lbl_desc)
         
-        self.toggle = QCheckBox()
-        self.toggle.setChecked(default_state)
-        self.toggle.setCursor(Qt.PointingHandCursor)
-        self.toggle.setStyleSheet(f"""
-            QCheckBox::indicator {{
-                width: 40px;
-                height: 20px;
-                border-radius: 10px;
-                border: 1px solid {BORDER_COLOR};
-                background-color: {BG_BASE};
-            }}
-            QCheckBox::indicator:checked {{
-                background-color: {ACCENT_BLUE};
-                border: 1px solid {ACCENT_BLUE};
-            }}
-        """)
+        self.toggle = AnimatedToggle(default_state=default_state)
         
         layout.addLayout(text_layout)
-        layout.addStretch()
-        layout.addWidget(self.toggle)
+        layout.addSpacing(20)
+        layout.addWidget(self.toggle, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
     def is_active(self):
         return self.toggle.isChecked()

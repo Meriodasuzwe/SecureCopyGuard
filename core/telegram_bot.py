@@ -5,14 +5,15 @@ import os
 import ctypes
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
-from PyQt5.QtCore import QThread, pyqtSignal, QMetaObject, Qt
+from PyQt5.QtCore import QThread, pyqtSignal, Qt # QMetaObject больше не нужен
 
 from config import get_telegram_token, get_telegram_chat_id, set_config_value
 from db.database import Database
 
 class TelegramAdminBot(QThread):
-    arm_signal    = pyqtSignal()
-    disarm_signal = pyqtSignal()
+    arm_signal       = pyqtSignal()
+    disarm_signal    = pyqtSignal()
+    hard_lock_signal = pyqtSignal() # 🔥 НАШ НОВЫЙ ЖЕЛЕЗОБЕТОННЫЙ СИГНАЛ
 
     def __init__(self):
         super().__init__()
@@ -26,13 +27,15 @@ class TelegramAdminBot(QThread):
     def set_dashboard(self, dashboard):
         """Вызвать из main.py: admin_bot.set_dashboard(window.page_dash)"""
         self._dashboard = dashboard
+        
+        # 🔥 ПРЯМО ТУТ НАМЕРТВО СВЯЗЫВАЕМ БОТА И ИНТЕРФЕЙС
+        self.hard_lock_signal.connect(self._dashboard.trigger_hard_lock)
 
     def run(self):
         def _kb():
             kb = ReplyKeyboardMarkup(resize_keyboard=True)
             kb.add(KeyboardButton("🟢 АКТИВИРОВАТЬ"), KeyboardButton("🔴 ВЫКЛЮЧИТЬ"))
             kb.add(KeyboardButton("📊 СТАТУС"),        KeyboardButton("📋 ОТЧЁТ"))
-            # 🔥 НОВЫЕ КНОПКИ: Мягкий и Жесткий лок
             kb.add(KeyboardButton("💻 СОФТ-ЛОК (Win)"), KeyboardButton("🧱 ХАРД-ЛОК (DLP)"))
             kb.add(KeyboardButton("🔌 ВЫРУБИТЬ ПК"))
             return kb
@@ -85,24 +88,22 @@ class TelegramAdminBot(QThread):
             except Exception as exc:
                 self.bot.reply_to(m, f"❌ Ошибка: {exc}")
 
-        # ── СОФТ-ЛОК (Обычный Win+L) ──
         @self.bot.message_handler(func=lambda m: m.text == "💻 СОФТ-ЛОК (Win)")
         def cmd_lock_pc(m):
             if m.chat.id != self.chat_id: return
             ctypes.windll.user32.LockWorkStation()
             self.bot.reply_to(m, "🔒 *Базовая блокировка выполнена!*\nПользователь выкинут на экран ввода пароля Windows.", parse_mode="Markdown")
 
-        # 🔥 АГРЕССИВНЫЙ ХАРД-ЛОК (Наш черный экран) ──
+        # 🔥 АГРЕССИВНЫЙ ХАРД-ЛОК
         @self.bot.message_handler(func=lambda m: m.text == "🧱 ХАРД-ЛОК (DLP)")
         def cmd_hard_lock(m):
             if m.chat.id != self.chat_id: return
             set_config_value("hard_lock", True)
             
-            # Безопасно вызываем метод UI из фонового потока
-            if self._dashboard:
-                QMetaObject.invokeMethod(self._dashboard, "trigger_hard_lock", Qt.QueuedConnection)
+            # 🔥 ВМЕСТО INVOKE_METHOD ПРОСТО ЭМИТИМ СИГНАЛ
+            self.hard_lock_signal.emit()
                 
-            self.bot.reply_to(m, " *АГРЕССИВНАЯ БЛОКИРОВКА АКТИВИРОВАНА!*\nПК заблокирован глухим экраном. Снять можно только через Master-PIN в программе.", parse_mode="Markdown")
+            self.bot.reply_to(m, "🧱 *АГРЕССИВНАЯ БЛОКИРОВКА АКТИВИРОВАНА!*\nПК заблокирован глухим экраном. Снять можно только через Master-PIN в программе.", parse_mode="Markdown")
 
         @self.bot.message_handler(func=lambda m: m.text == "🔌 ВЫРУБИТЬ ПК")
         def cmd_shutdown_pc(m):

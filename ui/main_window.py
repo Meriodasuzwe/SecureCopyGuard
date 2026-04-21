@@ -132,7 +132,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addStretch()
 
         # Версия
-        version_lbl = QLabel("v2.1 Enterprise")
+        version_lbl = QLabel("v3.0 Enterprise")
         version_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; padding: 0 20px; border: none;")
         sidebar_layout.addWidget(version_lbl)
 

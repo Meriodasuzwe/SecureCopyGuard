@@ -26,7 +26,7 @@ from core.usb_monitor   import USBMonitor
 from core.vision_protector import VisionProtector
 from core.telegram_alerts  import send_telegram_alert
 from core.autostart import enable_autostart, disable_autostart, is_enabled as autostart_is_enabled
-
+from ui.widgets import VectorIcon, AnimatedToggle
 import matplotlib
 matplotlib.use('Qt5Agg')
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -82,6 +82,17 @@ class DashboardPage(QWidget):
         self._flash_timer  = QTimer(self)
         self._flash_count  = 0
         self._flash_timer.timeout.connect(self._do_flash)
+
+        
+        self.sabotage_timer = QTimer(self)
+        self.sabotage_timer.setSingleShot(True)
+        self.sabotage_timer.timeout.connect(self._execute_sabotage_lock)
+        
+        self.sabotage_reset_timer = QTimer(self)
+        self.sabotage_reset_timer.setSingleShot(True)
+        self.sabotage_reset_timer.timeout.connect(self._reset_sabotage)
+        
+        self.is_sabotaged = False
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -431,21 +442,48 @@ class DashboardPage(QWidget):
     
     
     def _on_env_warning(self, msg: str):
-        # Пишем в лог как Low угрозу (чтобы безопасник видел, что юзер пытался закрыть камеру рукой)
-        self._log_and_notify("AI Vision", msg, level="Low")
-        
-        # Если система в боевом режиме, выводим алерт прямо на экран в статус!
-        if self.is_armed:
-            self.status_lbl.setText(msg)
-            self.status_lbl.setStyleSheet("color: #F59E0B; font-size: 13px; font-weight: bold; letter-spacing: 1px; margin-top: 15px;")
+        if not self.is_armed: 
+            return
             
+        # Сбрасываем таймер "отмены" (если 4 секунды нет спама - значит свет вернулся)
+        self.sabotage_reset_timer.start(4000)
+        
+        # Если это ПЕРВЫЙ сигнал о темноте
+        if not self.is_sabotaged:
+            self.is_sabotaged = True
+            
+            # Обновляем статус в интерфейсе
+            self.status_lbl.setText("⚠️ КАМЕРА ЗАКРЫТА! БЛОК ЧЕРЕЗ 10 СЕК.")
+            self.status_lbl.setStyleSheet("color: #F59E0B; font-size: 14px; font-weight: 900; letter-spacing: 2px; margin-top: 15px; background: transparent; border: none;")
+            
+            # Пишем один раз в логи и в ТГ, чтобы НЕ СПАМИТЬ!
+            self._log_and_notify("AI Vision", "Подозрение на саботаж (начало отсчета 10 сек)", level="Medium")
             from core.telegram_alerts import send_telegram_alert
-            send_telegram_alert(f"⚠️ ПОДОЗРЕНИЕ НА ВМЕШАТЕЛЬСТВО В РАБОТУ КАМЕРЫ,СРОЧНО ПРИМИТЕ МЕРЫ\n{msg}")
+            send_telegram_alert(f"⚠️ ВНИМАНИЕ: Камера перекрыта!\n{msg}\n\n⏳ Жду 10 секунд. Если камера не откроется, ПК будет заблокирован!")
+            
+            # Запускаем отсчет смерти на 10 секунд
+            self.sabotage_timer.start(10000)
 
-            self.trigger_hard_lock()
-            # Через 5 секунд возвращаем нормальный зеленый статус "СИСТЕМА АКТИВНА"
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(5000, lambda: self._set_ui_armed(True) if self.is_armed else None)
+    def _execute_sabotage_lock(self):
+        """Вызывается, если 10 секунд истекли, а камеру так и не открыли"""
+        self._log_and_notify("AI Vision", "КРИТИЧЕСКИЙ САБОТАЖ (> 10 сек)", level="Critical")
+        from core.telegram_alerts import send_telegram_alert
+        send_telegram_alert("🧱 КРИТИЧЕСКИЙ САБОТАЖ: Камера была закрыта более 10 секунд. Выполнен АВТОМАТИЧЕСКИЙ ХАРД-ЛОК!")
+        
+        self.trigger_hard_lock()
+
+    def _reset_sabotage(self):
+        """Вызывается, если спам прекратился (свет вернулся)"""
+        if self.is_sabotaged:
+            self.is_sabotaged = False
+            self.sabotage_timer.stop() # Отменяем хард-лок
+            
+            self._log_and_notify("AI Vision", "Камера снова открыта. Тревога отменена.", level="Low")
+            from core.telegram_alerts import send_telegram_alert
+            send_telegram_alert("✅ Камера снова открыта. Блокировка отменена.")
+            
+            # Возвращаем зеленый статус UI
+            self._set_ui_armed(True)
 
     def _on_file_incident(self, policy_id: int, message: str):
         level_map = {1: "Critical", 2: "High", 3: "Low"}
@@ -609,13 +647,21 @@ class DashboardPage(QWidget):
     
     @pyqtSlot()
     def trigger_hard_lock(self):
-        """Вызывается через QMetaObject из потока Telegram бота"""
+        """Вызывается из Telegram бота или автоматически при критической угрозе"""
         set_config_value("hard_lock", True)
         
-        # Запускаем локер, только если он еще не открыт
-        if not hasattr(self, 'locker_window') or not self.locker_window.isVisible():
-            self.locker_window = HardLockScreen()
-            self.locker_window.show()
+        
+        # Если окно было убито через deleteLater(), вызов isVisible() вызовет RuntimeError.
+        # Мы аккуратно ловим эту ошибку и создаем новое окно.
+        try:
+            if hasattr(self, 'locker_window') and self.locker_window.isVisible():
+                return # Окно уже на экране, ничего не делаем
+        except RuntimeError:
+            pass # Старое окно было уничтожено (мы ввели ПИН). Просто идем дальше!
+            
+        from ui.locker import HardLockScreen
+        self.locker_window = HardLockScreen()
+        self.locker_window.show()
     
     def _check_and_play_siren(self):
         if self._read_policies().get("siren"):
@@ -634,11 +680,19 @@ class PoliciesPage(QWidget):
     def setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(40, 40, 40, 40)
-        layout.setSpacing(12)
+        layout.setSpacing(16) # Уменьшили отступ для плотного вертикального списка
 
+        # Шапка
+        header_layout = QVBoxLayout()
         title = QLabel("ПОЛИТИКИ БЕЗОПАСНОСТИ")
-        title.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 22px; font-weight: 600; letter-spacing: 1px;")
-        layout.addWidget(title)
+        title.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 26px; font-weight: 800; letter-spacing: 1px;")
+        subtitle = QLabel("Тонкая настройка активных модулей защиты и ограничений.")
+        subtitle.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px;")
+        header_layout.addWidget(title)
+        header_layout.addWidget(subtitle)
+        layout.addLayout(header_layout)
+        
+        layout.addSpacing(10)
 
         s_file  = get_config_value("pol_file",   True)
         s_clip  = get_config_value("pol_clip",   True)
@@ -647,13 +701,14 @@ class PoliciesPage(QWidget):
         s_ai    = get_config_value("pol_ai",     False)
         s_siren = get_config_value("pol_siren",  False)
 
-        self.policy_file_lock = PolicyCard("Anti-Delete (Блокировка ФС)",    "Жёсткий запрет удаления и изменения файлов ОС.",                    default_state=s_file)
-        self.policy_clipboard = PolicyCard("Контроль буфера обмена",         "Блокировка копирования конфиденциальных данных.",                    default_state=s_clip)
-        self.policy_webcam    = PolicyCard("Webcam Trap",                    "Тайная фото-фиксация нарушителя при любом инциденте.",              default_state=s_webc)
-        self.policy_usb       = PolicyCard("USB Guard",                      "Блокировка и уведомление о подключении флешек.",                    default_state=s_usb)
-        self.policy_ai_vision = PolicyCard("AI Vision (YOLOv8)",             "Нейросеть детектирует смартфоны, наведенные на экран.",             default_state=s_ai)
-        self.policy_siren     = PolicyCard("Siren Alarm",                    "Громкий звуковой сигнал тревоги при утечке.",                       default_state=s_siren)
+        self.policy_file_lock = PolicyCard("Anti-Delete (Блокировка ФС)", "Жёсткий запрет удаления и изменения файлов ОС.", default_state=s_file)
+        self.policy_clipboard = PolicyCard("Контроль буфера обмена", "Блокировка копирования конфиденциальных данных.", default_state=s_clip)
+        self.policy_webcam    = PolicyCard("Webcam Trap", "Тайная фото-фиксация нарушителя при любом инциденте.", default_state=s_webc)
+        self.policy_usb       = PolicyCard("USB Guard", "Блокировка и уведомление о подключении флешек.", default_state=s_usb)
+        self.policy_ai_vision = PolicyCard("AI Vision (YOLOv8)", "Нейросеть детектирует смартфоны, наведенные на экран.", default_state=s_ai)
+        self.policy_siren     = PolicyCard("Siren Alarm", "Громкий звуковой сигнал тревоги при утечке.", default_state=s_siren)
 
+        # Добавляем карточки друг под друга (Вертикальный список)
         for card in [
             self.policy_file_lock,
             self.policy_clipboard,
@@ -664,7 +719,7 @@ class PoliciesPage(QWidget):
         ]:
             layout.addWidget(card)
 
-        layout.addStretch()
+        layout.addStretch() # Прижимаем всё наверх, чтобы не разъезжалось
 
     def get_policies(self):
         return {
@@ -692,6 +747,7 @@ class PoliciesPage(QWidget):
             self.policy_ai_vision, self.policy_siren,
         ]:
             card.setEnabled(not is_locked)
+            from PyQt5.QtWidgets import QGraphicsOpacityEffect # На всякий случай импорт
             effect = QGraphicsOpacityEffect()
             effect.setOpacity(0.4 if is_locked else 1.0)
             card.setGraphicsEffect(effect)
@@ -911,9 +967,9 @@ class SettingsPage(QWidget):
         grid.setSpacing(16)
         grid.setContentsMargins(0, 0, 0, 0)
 
-        # Карточка 1 — PIN
+        # Карточка 1 — PIN (Иконка щита)
         pin_card = self._make_card(
-            icon="🛡",
+            icon_type="shield",
             title="УПРАВЛЕНИЕ ДОСТУПОМ",
             desc="Master-PIN, секретное слово\nдля офлайн-восстановления",
             btn_text="Настроить безопасность",
@@ -922,9 +978,9 @@ class SettingsPage(QWidget):
         )
         grid.addWidget(pin_card, 0, 0)
 
-        # Карточка 2 — Telegram
+        # Карточка 2 — Telegram (Иконка самолетика)
         tg_card = self._make_card(
-            icon="✈",
+            icon_type="paper_plane",
             title="ИНТЕГРАЦИЯ TELEGRAM",
             desc="Подключение бота для алертов,\nфото-доказательств и PDF-отчётов",
             btn_text="Настроить Telegram",
@@ -933,11 +989,11 @@ class SettingsPage(QWidget):
         )
         grid.addWidget(tg_card, 0, 1)
 
-        # Карточка 3 — Автозапуск
+        # Карточка 3 — Автозапуск (Иконка пульса + Тумблер)
         auto_card = self._make_autostart_card()
         grid.addWidget(auto_card, 1, 0)
 
-        # Карточка 4 — Инфо
+        # Карточка 4 — Инфо (Иконка настроек)
         info_card = self._make_info_card()
         grid.addWidget(info_card, 1, 1)
 
@@ -949,14 +1005,14 @@ class SettingsPage(QWidget):
         main_layout.addLayout(grid, stretch=1)
 
         # ── Подвал ─────────────────────────────────────────────────────
-        footer = QLabel("Licensed to Rakhat Aliev  ·  SecureCopyGuard Enterprise v3.0")
+        footer = QLabel("Licensed to Zhandos Aktayev  ·  SecureCopyGuard Enterprise v3.0")
         footer.setAlignment(Qt.AlignCenter)
         footer.setStyleSheet("color: #334155; font-size: 11px; font-weight: 600; letter-spacing: 1px;")
         main_layout.addWidget(footer)
 
     # ── Фабрика карточек ───────────────────────────────────────────────
 
-    def _make_card(self, icon, title, desc, btn_text, accent, on_click):
+    def _make_card(self, icon_type, title, desc, btn_text, accent, on_click):
         frame = QFrame()
         frame.setStyleSheet(f"""
             QFrame {{
@@ -973,19 +1029,24 @@ class SettingsPage(QWidget):
         layout.setContentsMargins(28, 28, 28, 28)
         layout.setSpacing(0)
 
-        # Иконка в цветном круге
+        # 🔥 Векторная иконка в цветном круге с градиентом
         icon_wrap = QHBoxLayout()
-        icon_lbl = QLabel(icon)
-        icon_lbl.setFixedSize(52, 52)
-        icon_lbl.setAlignment(Qt.AlignCenter)
-        icon_lbl.setStyleSheet(f"""
-            font-size: 22px;
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                stop:0 {accent}33, stop:1 {accent}11);
+        
+        icon_container = QWidget()
+        icon_container.setFixedSize(52, 52)
+        icon_container.setStyleSheet(f"""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {accent}33, stop:1 {accent}11);
             border: 1px solid {accent}44;
             border-radius: 14px;
         """)
-        icon_wrap.addWidget(icon_lbl)
+        icon_layout = QVBoxLayout(icon_container)
+        icon_layout.setAlignment(Qt.AlignCenter)
+        icon_layout.setContentsMargins(0, 0, 0, 0)
+        
+        vec_icon = VectorIcon(icon_type, accent)
+        icon_layout.addWidget(vec_icon)
+        
+        icon_wrap.addWidget(icon_container)
         icon_wrap.addStretch()
         layout.addLayout(icon_wrap)
         layout.addSpacing(16)
@@ -1040,6 +1101,7 @@ class SettingsPage(QWidget):
         return frame
 
     def _make_autostart_card(self):
+        accent = "#8B5CF6"
         frame = QFrame()
         frame.setStyleSheet(f"""
             QFrame {{
@@ -1047,78 +1109,54 @@ class SettingsPage(QWidget):
                 border: 1px solid {BORDER_COLOR};
                 border-radius: 16px;
             }}
-            QFrame:hover {{
-                border: 1px solid #8B5CF6;
-            }}
+            QFrame:hover {{ border: 1px solid {accent}; }}
         """)
 
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(28, 28, 28, 28)
         layout.setSpacing(0)
 
-        # Иконка
+        # 🔥 Векторная иконка пульса
         icon_wrap = QHBoxLayout()
-        icon_lbl = QLabel("⚡")
-        icon_lbl.setFixedSize(52, 52)
-        icon_lbl.setAlignment(Qt.AlignCenter)
-        icon_lbl.setStyleSheet("""
-            font-size: 22px;
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                stop:0 #8B5CF633, stop:1 #8B5CF611);
-            border: 1px solid #8B5CF644;
+        icon_container = QWidget()
+        icon_container.setFixedSize(52, 52)
+        icon_container.setStyleSheet(f"""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {accent}33, stop:1 {accent}11);
+            border: 1px solid {accent}44;
             border-radius: 14px;
         """)
-        icon_wrap.addWidget(icon_lbl)
+        icon_layout = QVBoxLayout(icon_container)
+        icon_layout.setAlignment(Qt.AlignCenter)
+        icon_layout.setContentsMargins(0, 0, 0, 0)
+        vec_icon = VectorIcon("pulse", accent)
+        icon_layout.addWidget(vec_icon)
+        icon_wrap.addWidget(icon_container)
         icon_wrap.addStretch()
         layout.addLayout(icon_wrap)
         layout.addSpacing(16)
 
         lbl_title = QLabel("СИСТЕМНЫЕ ПАРАМЕТРЫ")
-        lbl_title.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; font-size: 13px; font-weight: 800; "
-            f"letter-spacing: 1px; border: none; background: transparent;"
-        )
+        lbl_title.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 13px; font-weight: 800; letter-spacing: 1px; border: none; background: transparent;")
         layout.addWidget(lbl_title)
         layout.addSpacing(8)
 
         lbl_desc = QLabel("Интеграция агента защиты\nс автозагрузкой ОС Windows")
-        lbl_desc.setStyleSheet(
-            f"color: {TEXT_MUTED}; font-size: 12px; border: none; background: transparent;"
-        )
+        lbl_desc.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px; border: none; background: transparent;")
         layout.addWidget(lbl_desc)
         layout.addStretch()
         layout.addSpacing(20)
 
-        # Переключатель автозапуска
+        # 🔥 НАШ КРУТОЙ ТУМБЛЕР ВМЕСТО СТАРОГО ЧЕКБОКСА
         toggle_row = QHBoxLayout()
         toggle_lbl = QLabel("Запускать вместе с Windows")
-        toggle_lbl.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; font-size: 13px; font-weight: 600; "
-            f"border: none; background: transparent;"
-        )
+        toggle_lbl.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 13px; font-weight: 600; border: none; background: transparent;")
 
-        self.cb_autostart = QCheckBox()
         try:
-            self.cb_autostart.setChecked(autostart_is_enabled())
+            is_auto = autostart_is_enabled()
         except Exception:
-            pass
-        self.cb_autostart.setStyleSheet(f"""
-            QCheckBox {{
-                border: none;
-                background: transparent;
-            }}
-            QCheckBox::indicator {{
-                width: 44px;
-                height: 24px;
-                border-radius: 12px;
-                border: 2px solid {BORDER_COLOR};
-                background: {BG_BASE};
-            }}
-            QCheckBox::indicator:checked {{
-                background: #8B5CF6;
-                border-color: #8B5CF6;
-            }}
-        """)
+            is_auto = False
+            
+        self.cb_autostart = AnimatedToggle(default_state=is_auto)
         self.cb_autostart.stateChanged.connect(self._toggle_autostart)
 
         toggle_row.addWidget(toggle_lbl)
@@ -1129,6 +1167,7 @@ class SettingsPage(QWidget):
         return frame
 
     def _make_info_card(self):
+        accent = "#10B981"
         frame = QFrame()
         frame.setStyleSheet(f"""
             QFrame {{
@@ -1136,41 +1175,37 @@ class SettingsPage(QWidget):
                 border: 1px solid {BORDER_COLOR};
                 border-radius: 16px;
             }}
-            QFrame:hover {{
-                border: 1px solid #10B981;
-            }}
+            QFrame:hover {{ border: 1px solid {accent}; }}
         """)
 
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(28, 28, 28, 28)
         layout.setSpacing(0)
 
-        # Иконка
+        # 🔥 Векторная иконка ползунков
         icon_wrap = QHBoxLayout()
-        icon_lbl = QLabel("⚙")
-        icon_lbl.setFixedSize(52, 52)
-        icon_lbl.setAlignment(Qt.AlignCenter)
-        icon_lbl.setStyleSheet("""
-            font-size: 22px;
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                stop:0 #10B98133, stop:1 #10B98111);
-            border: 1px solid #10B98144;
+        icon_container = QWidget()
+        icon_container.setFixedSize(52, 52)
+        icon_container.setStyleSheet(f"""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {accent}33, stop:1 {accent}11);
+            border: 1px solid {accent}44;
             border-radius: 14px;
         """)
-        icon_wrap.addWidget(icon_lbl)
+        icon_layout = QVBoxLayout(icon_container)
+        icon_layout.setAlignment(Qt.AlignCenter)
+        icon_layout.setContentsMargins(0, 0, 0, 0)
+        vec_icon = VectorIcon("gear", accent)
+        icon_layout.addWidget(vec_icon)
+        icon_wrap.addWidget(icon_container)
         icon_wrap.addStretch()
         layout.addLayout(icon_wrap)
         layout.addSpacing(16)
 
         lbl_title = QLabel("ТЕХНИЧЕСКАЯ ИНФОРМАЦИЯ")
-        lbl_title.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; font-size: 13px; font-weight: 800; "
-            f"letter-spacing: 1px; border: none; background: transparent;"
-        )
+        lbl_title.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 13px; font-weight: 800; letter-spacing: 1px; border: none; background: transparent;")
         layout.addWidget(lbl_title)
         layout.addSpacing(16)
 
-        # Строки информации
         info_items = [
             ("AI Engine",       "YOLOv8 Nano",    "#3B82F6"),
             ("Storage",         "dlp_logs.db",    "#10B981"),
@@ -1189,10 +1224,7 @@ class SettingsPage(QWidget):
             lbl_key.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px; border: none; background: transparent;")
 
             lbl_val = QLabel(value)
-            lbl_val.setStyleSheet(
-                f"color: {TEXT_PRIMARY}; font-size: 12px; font-weight: 600; "
-                f"border: none; background: transparent;"
-            )
+            lbl_val.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 12px; font-weight: 600; border: none; background: transparent;")
 
             row.addWidget(dot)
             row.addWidget(lbl_key)
@@ -1201,9 +1233,8 @@ class SettingsPage(QWidget):
             layout.addLayout(row)
             layout.addSpacing(10)
 
-        layout.addStretch() # Пружина, чтобы кнопка ушла в самый низ
+        layout.addStretch()
 
-        # 🔥 НОВАЯ КНОПКА ГЕНЕРАЦИИ PDF
         btn_pdf = QPushButton("Выгрузить PDF-отчёт")
         btn_pdf.setFixedHeight(40)
         btn_pdf.setCursor(Qt.PointingHandCursor)
@@ -1218,20 +1249,14 @@ class SettingsPage(QWidget):
                 border-radius: 10px;
                 margin-top: 5px;
             }}
-            QPushButton:hover {{
-                background-color: rgba(16, 185, 129, 0.1);
-            }}
-            QPushButton:pressed {{
-                background-color: rgba(16, 185, 129, 0.2);
-            }}
+            QPushButton:hover {{ background-color: rgba(16, 185, 129, 0.1); }}
+            QPushButton:pressed {{ background-color: rgba(16, 185, 129, 0.2); }}
         """)
         btn_pdf.clicked.connect(self.export_pdf)
         layout.addWidget(btn_pdf)
 
         return frame
 
-    
-    
     def export_pdf(self):
         try:
             from ui.pdf_report import generate_report
@@ -1239,19 +1264,14 @@ class SettingsPage(QWidget):
             file_path = generate_report()
             
             msg = QMessageBox(self)
-            # Задаем только фон и кнопку. Текст покрасим через HTML
             msg.setStyleSheet("""
                 QMessageBox { background-color: #0F172A; border: 1px solid #334155; }
-                QPushButton {
-                    background-color: #10B981; color: white; font-weight: 800;
-                    border-radius: 6px; padding: 8px 20px; min-width: 80px; border: none;
-                }
+                QPushButton { background-color: #10B981; color: white; font-weight: 800; border-radius: 6px; padding: 8px 20px; min-width: 80px; border: none; }
                 QPushButton:hover { background-color: #059669; }
             """)
 
             if file_path and os.path.exists(file_path):
                 msg.setWindowTitle("✅ Отчет сформирован")
-                # 🔥 Обертка в span принудительно делает текст белым
                 msg.setText(f'<span style="color: #F8FAFC; font-size: 13px;">PDF-отчёт успешно сгенерирован!<br><br>Сохранён в: <b>{file_path}</b></span>')
                 msg.setIcon(QMessageBox.Information)
                 msg.exec_()
@@ -1277,8 +1297,6 @@ class SettingsPage(QWidget):
                 QPushButton:hover { background-color: #DC2626; }
             """)
             err_msg.exec_()
-
-    # ── Действия ───────────────────────────────────────────────────────
 
     def open_pin_dialog(self):
         ConfigPinDialog(self).exec_()
